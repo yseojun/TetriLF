@@ -4,7 +4,7 @@ import json
 
 
 #config file
-cfgfile = 'configs/NHR/sport1.py'
+cfgfile = 'configs/NHR_RERF/sport3.py'
 #Number of frames
 N_frame = 200
 

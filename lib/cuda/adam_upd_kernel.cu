@@ -71,7 +71,7 @@ void adam_upd_cuda(
 
   const float step_size = lr * sqrt(1 - pow(beta2, (float)step)) / (1 - pow(beta1, (float)step));
 
-  AT_DISPATCH_FLOATING_TYPES(param.type(), "adam_upd_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(param.scalar_type(), "adam_upd_cuda", ([&] {
     adam_upd_cuda_kernel<scalar_t><<<blocks, threads>>>(
         param.data<scalar_t>(),
         grad.data<scalar_t>(),
@@ -95,7 +95,7 @@ void masked_adam_upd_cuda(
 
   const float step_size = lr * sqrt(1 - pow(beta2, (float)step)) / (1 - pow(beta1, (float)step));
 
-  AT_DISPATCH_FLOATING_TYPES(param.type(), "masked_adam_upd_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(param.scalar_type(), "masked_adam_upd_cuda", ([&] {
     masked_adam_upd_cuda_kernel<scalar_t><<<blocks, threads>>>(
         param.data<scalar_t>(),
         grad.data<scalar_t>(),
@@ -120,7 +120,7 @@ void adam_upd_with_perlr_cuda(
 
   const float step_size = lr * sqrt(1 - pow(beta2, (float)step)) / (1 - pow(beta1, (float)step));
 
-  AT_DISPATCH_FLOATING_TYPES(param.type(), "adam_upd_with_perlr_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(param.scalar_type(), "adam_upd_with_perlr_cuda", ([&] {
     adam_upd_with_perlr_cuda_kernel<scalar_t><<<blocks, threads>>>(
         param.data<scalar_t>(),
         grad.data<scalar_t>(),

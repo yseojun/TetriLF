@@ -141,7 +141,7 @@ def make_density_image(density_grid, nbits, act_shift=0):
     res = tile_maker(data[0])
 
     '''
-    ipdb.set_trace()
+    #ipdb.set_trace()
     
     data = data.reshape(-1)
     th = int(np.round(data.size(0)/image.size(1))+1)
@@ -218,7 +218,7 @@ if __name__=='__main__':
         assert os.path.isfile(tmp_file), "Checkpoint not found."
 
         tqdm.write(f"Loading Checkpoint {tmp_file}")
-        ckpt = torch.load(tmp_file, map_location='cpu')
+        ckpt = torch.load(tmp_file, map_location='cpu', weights_only=False)
         
 
         density = ckpt['model_state_dict']['density.grid'].clone()

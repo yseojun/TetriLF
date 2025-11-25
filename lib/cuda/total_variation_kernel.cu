@@ -47,7 +47,7 @@ void total_variation_add_grad_cuda(torch::Tensor param, torch::Tensor grad, floa
   wz /= 6;
 
   if(dense_mode) {
-    AT_DISPATCH_FLOATING_TYPES(param.type(), "total_variation_add_grad_cuda", ([&] {
+    AT_DISPATCH_FLOATING_TYPES(param.scalar_type(), "total_variation_add_grad_cuda", ([&] {
       total_variation_add_grad_cuda_kernel<scalar_t,true><<<blocks, threads>>>(
           param.data<scalar_t>(),
           grad.data<scalar_t>(),
@@ -56,7 +56,7 @@ void total_variation_add_grad_cuda(torch::Tensor param, torch::Tensor grad, floa
     }));
   }
   else {
-     AT_DISPATCH_FLOATING_TYPES(param.type(), "total_variation_add_grad_cuda", ([&] {
+     AT_DISPATCH_FLOATING_TYPES(param.scalar_type(), "total_variation_add_grad_cuda", ([&] {
       total_variation_add_grad_cuda_kernel<scalar_t,false><<<blocks, threads>>>(
           param.data<scalar_t>(),
           grad.data<scalar_t>(),

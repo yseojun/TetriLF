@@ -2,7 +2,13 @@ import os, sys, copy, glob, json, time, random, argparse
 from shutil import copyfile
 from tqdm import tqdm, trange
 import wandb
-import mmcv
+try:
+    from mmengine import Config
+except ImportError:
+    try:
+        from mmcv import Config
+    except ImportError:
+        raise ImportError("mmcv.Config 또는 mmengine.Config를 import할 수 없습니다. mmengine을 설치하세요: pip install mmengine")
 import imageio
 import numpy as np
 import ipdb
@@ -310,7 +316,7 @@ if __name__=='__main__':
     # load setup
     parser = config_parser()
     args = parser.parse_args()
-    cfg = mmcv.Config.fromfile(args.config)
+    cfg = Config.fromfile(args.config)
 
 
     cfg.data.frame_ids = args.frame_ids[:1]
@@ -408,7 +414,7 @@ if __name__=='__main__':
 
                 
 
-        checkpoint =torch.load(rgbnet_file)
+        checkpoint =torch.load(rgbnet_file, weights_only=False)
         model_kwargs = checkpoint['model_kwargs']
         if cfg.fine_model_and_render.RGB_model=='MLP':
             dim0 = model_kwargs['dim0']

@@ -2,7 +2,6 @@ import os, sys, copy, glob, json, time, random, argparse
 from shutil import copyfile
 from tqdm import tqdm, trange
 import wandb
-import mmcv
 import imageio
 import numpy as np
 import ipdb
@@ -18,6 +17,14 @@ from lib.dvgo_video import RGB_Net, RGB_SH_Net
 from torch_efficient_distloss import flatten_eff_distloss
 import pandas as pd
 import time
+
+try:
+    from mmengine import Config
+except ImportError:
+    try:
+        from mmcv import Config
+    except ImportError:
+        raise ImportError("mmcv.Config 또는 mmengine.Config를 import할 수 없습니다. mmengine을 설치하세요: pip install mmengine")
 
 def excepthook(exc_type, exc_value, exc_traceback):
     ipdb.post_mortem(exc_traceback)
@@ -303,7 +310,7 @@ if __name__=='__main__':
     # load setup
     parser = config_parser()
     args = parser.parse_args()
-    cfg = mmcv.Config.fromfile(args.config)
+    cfg = Config.fromfile(args.config)
 
 
     cfg.data.frame_ids = args.frame_ids
@@ -397,7 +404,7 @@ if __name__=='__main__':
 
                     
 
-            checkpoint =torch.load(rgbnet_file)
+            checkpoint =torch.load(rgbnet_file, weights_only=False)
             model_kwargs = checkpoint['model_kwargs']
             if cfg.fine_model_and_render.RGB_model=='MLP':
                 dim0 = model_kwargs['dim0']

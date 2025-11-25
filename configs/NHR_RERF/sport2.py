@@ -1,9 +1,9 @@
 _base_ = '../default.py'
 expname = 'sport2'
-basedir = './logs2/'
+basedir = '/data/ysj/result/tetrirf/logs/'
 
 data = dict(
-	datadir='./sport_2_mask',
+	datadir='/data/ysj/dataset/NHR/sport_2',
 	dataset_type='NHR',
 	white_bkgd=True,
     xyz_min = [-0.2130, -0.9231, -0.3601],

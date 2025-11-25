@@ -4,7 +4,7 @@ import json
 
 
 # change the config file here
-config_file = "configs/NHR/sport1.py"
+config_file = "configs/NHR_RERF/basketball.py"
 step = 20
 overlap = True
 
@@ -25,9 +25,3 @@ with open(filename,'w') as f:
 print(filename)
 
 os.system(f"sh {filename}")
-
-
-
-
-
-

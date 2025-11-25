@@ -134,7 +134,7 @@ if __name__=='__main__':
         assert os.path.isfile(tmp_file), "Checkpoint not found."
 
         tqdm.write(f"Loading Checkpoint {tmp_file}")
-        ckpt = torch.load(tmp_file, map_location='cpu')
+        ckpt = torch.load(tmp_file, map_location='cpu', weights_only=False)
         
 
         density = ckpt['model_state_dict']['density.grid'].clone()

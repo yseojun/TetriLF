@@ -191,7 +191,7 @@ class DirectVoxGO_Video(torch.nn.Module):
             if not os.path.isfile(last_ckpt_path):
                 print(f"Frame {frameid}'s checkpoint doesn't exist")
                 continue
-            ckpt = torch.load(last_ckpt_path)
+            ckpt = torch.load(last_ckpt_path, weights_only=False)
 
             #根据ckpt中的model_kwargs来创建模型
             model_kwargs = ckpt['model_kwargs']
@@ -225,7 +225,7 @@ class DirectVoxGO_Video(torch.nn.Module):
                 rgbnet_file = os.path.join(cfg.basedir, cfg.expname, f'rgbnet_{beg}_{eend}.tar')
             
         if os.path.isfile(rgbnet_file):
-            checkpoint =torch.load(rgbnet_file)
+            checkpoint =torch.load(rgbnet_file, weights_only=False)
             self.rgbnet.load_state_dict(checkpoint['model_state_dict'])  # 加载模型参数
             print('load RGBNet', rgbnet_file)
         return ret

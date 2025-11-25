@@ -100,7 +100,7 @@ if __name__=='__main__':
     os.makedirs(outdir, exist_ok=True)
 
 
-    ckpt = torch.load(os.path.join(args.dir, '..', args.model_template))
+    ckpt = torch.load(os.path.join(args.dir, '..', args.model_template), weights_only=False)
 
     name = args.dir.split('/')[-2]
     wandbrun = wandb.init(
@@ -131,7 +131,7 @@ if __name__=='__main__':
     fpsnr = []
     dpsnr = []
     for frameid in tqdm(range(0, args.numframe,10)):
-        raw_frame = torch.load(os.path.join(args.dir, f'planes_frame_{frameid}.nf'))
+        raw_frame = torch.load(os.path.join(args.dir, f'planes_frame_{frameid}.nf'), weights_only=False)
 
         low_bound,high_bound = raw_frame['bounds']
 

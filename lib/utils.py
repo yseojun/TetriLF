@@ -106,7 +106,7 @@ def create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step):
 ''' Checkpoint utils
 '''
 def load_checkpoint(model, optimizer, ckpt_path, no_reload_optimizer):
-    ckpt = torch.load(ckpt_path)
+    ckpt = torch.load(ckpt_path, weights_only=False)
     start = ckpt['global_step']
     model.load_state_dict(ckpt['model_state_dict'], strict=False)
     if not no_reload_optimizer:
@@ -115,7 +115,7 @@ def load_checkpoint(model, optimizer, ckpt_path, no_reload_optimizer):
 
 
 def load_model(model_class, ckpt_path,residual = False):
-    ckpt = torch.load(ckpt_path)
+    ckpt = torch.load(ckpt_path, weights_only=False)
     
     ckpt['model_kwargs']['residual_mode'] = residual
     if 'RGB_model' in ckpt['model_kwargs']:
@@ -125,7 +125,7 @@ def load_model(model_class, ckpt_path,residual = False):
     return model
 
 def load_residual_model(model_class, ckpt_path,residual = False):
-    ckpt = torch.load(ckpt_path)
+    ckpt = torch.load(ckpt_path, weights_only=False)
     model = model_class(**ckpt['model_kwargs'])
     model.load_state_dict(ckpt['model_state_dict'])
 

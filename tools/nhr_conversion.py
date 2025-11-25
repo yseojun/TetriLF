@@ -3,11 +3,11 @@ import os
 import json
 
 # path to the scene folder of NHR dataset
-root_path = '/scratch/leuven/346/vsc34668/sport_1_mask'
+root_path = '/data/ysj/dataset/NHR/basketball'
 # number of cameras.  56 for NHR dataset
-N_cam = 56  
+N_cam = 72
 # number of frames.  56 for NHR dataset
-N_frame = 200
+N_frame = 195
 
 def campose_to_extrinsic(camposes):
     if camposes.shape[1]!=12:

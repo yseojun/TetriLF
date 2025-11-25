@@ -89,7 +89,7 @@ std::vector<torch::Tensor> infer_t_minmax_cuda(
   const int threads = 256;
   const int blocks = (n_rays + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(rays_o.type(), "infer_t_minmax_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(rays_o.scalar_type(), "infer_t_minmax_cuda", ([&] {
     infer_t_minmax_cuda_kernel<scalar_t><<<blocks, threads>>>(
         rays_o.data<scalar_t>(),
         rays_d.data<scalar_t>(),
@@ -108,7 +108,7 @@ torch::Tensor infer_n_samples_cuda(torch::Tensor rays_d, torch::Tensor t_min, to
   auto n_samples = torch::empty({n_rays}, torch::dtype(torch::kInt64).device(torch::kCUDA));
   const int threads = 256;
   const int blocks = (n_rays + threads - 1) / threads;
-  AT_DISPATCH_FLOATING_TYPES(t_min.type(), "infer_n_samples_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(t_min.scalar_type(), "infer_n_samples_cuda", ([&] {
     infer_n_samples_cuda_kernel<scalar_t><<<blocks, threads>>>(
         rays_d.data<scalar_t>(),
         t_min.data<scalar_t>(),
@@ -126,7 +126,7 @@ std::vector<torch::Tensor> infer_ray_start_dir_cuda(torch::Tensor rays_o, torch:
   const int blocks = (n_rays + threads - 1) / threads;
   auto rays_start = torch::empty_like(rays_o);
   auto rays_dir = torch::empty_like(rays_o);
-  AT_DISPATCH_FLOATING_TYPES(rays_o.type(), "infer_ray_start_dir_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(rays_o.scalar_type(), "infer_ray_start_dir_cuda", ([&] {
     infer_ray_start_dir_cuda_kernel<scalar_t><<<blocks, threads>>>(
         rays_o.data<scalar_t>(),
         rays_d.data<scalar_t>(),
@@ -226,7 +226,7 @@ std::vector<torch::Tensor> sample_pts_on_rays_cuda(
   auto rays_pts = torch::empty({total_len, 3}, torch::dtype(rays_o.dtype()).device(torch::kCUDA));
   auto mask_outbbox = torch::empty({total_len}, torch::dtype(torch::kBool).device(torch::kCUDA));
 
-  AT_DISPATCH_FLOATING_TYPES(rays_o.type(), "sample_pts_on_rays_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(rays_o.scalar_type(), "sample_pts_on_rays_cuda", ([&] {
     sample_pts_on_rays_cuda_kernel<scalar_t><<<(total_len+threads-1)/threads, threads>>>(
         rays_start.data<scalar_t>(),
         rays_dir.data<scalar_t>(),
@@ -279,7 +279,7 @@ std::vector<torch::Tensor> sample_ndc_pts_on_rays_cuda(
   auto rays_pts = torch::empty({n_rays, N_samples, 3}, torch::dtype(rays_o.dtype()).device(torch::kCUDA));
   auto mask_outbbox = torch::empty({n_rays, N_samples}, torch::dtype(torch::kBool).device(torch::kCUDA));
 
-  AT_DISPATCH_FLOATING_TYPES(rays_o.type(), "sample_ndc_pts_on_rays_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(rays_o.scalar_type(), "sample_ndc_pts_on_rays_cuda", ([&] {
     sample_ndc_pts_on_rays_cuda_kernel<scalar_t><<<(n_rays*N_samples+threads-1)/threads, threads>>>(
         rays_o.data<scalar_t>(),
         rays_d.data<scalar_t>(),
@@ -347,7 +347,7 @@ torch::Tensor sample_bg_pts_on_rays_cuda(
 
   auto rays_pts = torch::empty({n_rays, N_samples, 3}, torch::dtype(rays_o.dtype()).device(torch::kCUDA));
 
-  AT_DISPATCH_FLOATING_TYPES(rays_o.type(), "sample_bg_pts_on_rays_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(rays_o.scalar_type(), "sample_bg_pts_on_rays_cuda", ([&] {
     sample_bg_pts_on_rays_cuda_kernel<scalar_t><<<(n_rays*N_samples+threads-1)/threads, threads>>>(
         rays_o.data<scalar_t>(),
         rays_d.data<scalar_t>(),
@@ -410,7 +410,7 @@ torch::Tensor maskcache_lookup_cuda(
   const int threads = 256;
   const int blocks = (n_pts + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(xyz.type(), "maskcache_lookup_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(xyz.scalar_type(), "maskcache_lookup_cuda", ([&] {
     maskcache_lookup_cuda_kernel<scalar_t><<<blocks, threads>>>(
         world.data<bool>(),
         xyz.data<scalar_t>(),
@@ -469,7 +469,7 @@ std::vector<torch::Tensor> raw2alpha_cuda(torch::Tensor density, const float shi
   const int threads = 256;
   const int blocks = (n_pts + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(density.type(), "raw2alpha_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(density.scalar_type(), "raw2alpha_cuda", ([&] {
     raw2alpha_cuda_kernel<scalar_t><<<blocks, threads>>>(
         density.data<scalar_t>(),
         shift, interval, n_pts,
@@ -492,7 +492,7 @@ std::vector<torch::Tensor> raw2alpha_nonuni_cuda(torch::Tensor density, const fl
   const int threads = 256;
   const int blocks = (n_pts + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(density.type(), "raw2alpha_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(density.scalar_type(), "raw2alpha_cuda", ([&] {
     raw2alpha_nonuni_cuda_kernel<scalar_t><<<blocks, threads>>>(
         density.data<scalar_t>(),
         shift, interval.data<scalar_t>(), n_pts,
@@ -540,7 +540,7 @@ torch::Tensor raw2alpha_backward_cuda(torch::Tensor exp_d, torch::Tensor grad_ba
   const int threads = 256;
   const int blocks = (n_pts + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(exp_d.type(), "raw2alpha_backward_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(exp_d.scalar_type(), "raw2alpha_backward_cuda", ([&] {
     raw2alpha_backward_cuda_kernel<scalar_t><<<blocks, threads>>>(
         exp_d.data<scalar_t>(),
         grad_back.data<scalar_t>(),
@@ -562,7 +562,7 @@ torch::Tensor raw2alpha_nonuni_backward_cuda(torch::Tensor exp_d, torch::Tensor 
   const int threads = 256;
   const int blocks = (n_pts + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(exp_d.type(), "raw2alpha_backward_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(exp_d.scalar_type(), "raw2alpha_backward_cuda", ([&] {
     raw2alpha_nonuni_backward_cuda_kernel<scalar_t><<<blocks, threads>>>(
         exp_d.data<scalar_t>(),
         grad_back.data<scalar_t>(),
@@ -636,7 +636,7 @@ std::vector<torch::Tensor> alpha2weight_cuda(torch::Tensor alpha, torch::Tensor 
 
   const int blocks = (n_rays + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(alpha.type(), "alpha2weight_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(alpha.scalar_type(), "alpha2weight_cuda", ([&] {
     alpha2weight_cuda_kernel<scalar_t><<<blocks, threads>>>(
         alpha.data<scalar_t>(),
         n_rays,
@@ -689,7 +689,7 @@ torch::Tensor alpha2weight_backward_cuda(
   const int threads = 256;
   const int blocks = (n_rays + threads - 1) / threads;
 
-  AT_DISPATCH_FLOATING_TYPES(alpha.type(), "alpha2weight_backward_cuda", ([&] {
+  AT_DISPATCH_FLOATING_TYPES(alpha.scalar_type(), "alpha2weight_backward_cuda", ([&] {
     alpha2weight_backward_cuda_kernel<scalar_t><<<blocks, threads>>>(
         alpha.data<scalar_t>(),
         weight.data<scalar_t>(),

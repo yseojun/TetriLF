@@ -434,7 +434,7 @@ class MaskGrid(nn.Module):
     def __init__(self, path=None, mask_cache_thres=None, mask=None, xyz_min=None, xyz_max=None):
         super(MaskGrid, self).__init__()
         if path is not None:
-            st = torch.load(path)
+            st = torch.load(path, weights_only=False)
             self.mask_cache_thres = mask_cache_thres
             density = F.max_pool3d(st['model_state_dict']['density.grid'], kernel_size=3, padding=1, stride=1)
             alpha = 1 - torch.exp(-F.softplus(density + st['model_state_dict']['act_shift']) * st['model_kwargs']['voxel_size_ratio'])

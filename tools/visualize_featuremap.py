@@ -62,7 +62,7 @@ mmin = None
 mmax = None
 for frameid in range(0,180):
 
-    state = torch.load(os.path.join(path, f'fine_last_{frameid}.tar'))
+    state = torch.load(os.path.join(path, f'fine_last_{frameid}.tar'), weights_only=False)
     planes = ['k0.xy_plane','k0.xz_plane','k0.yz_plane']
     mean_vals = []
 
