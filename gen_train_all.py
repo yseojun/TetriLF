@@ -7,11 +7,11 @@ import json
 # =============================================================================
 DATASET_FRAMES = {
     # ambushfight: 20 frames
-    # 'ambushfight_1': 20,
-    # 'ambushfight_2': 20,
-    # 'ambushfight_3': 20,
-    # 'ambushfight_4': 20,
-    # 'ambushfight_5': 20,
+    'ambushfight_1': 20,
+    'ambushfight_2': 20,
+    'ambushfight_3': 20,
+    'ambushfight_4': 20,
+    'ambushfight_5': 20,
     'ambushfight_6': 20,
     # bamboo: 50 frames
     'bamboo_1': 50,
@@ -51,9 +51,9 @@ DATASETS = list(DATASET_FRAMES.keys())  # 전체 학습시 사용
 # 공통 설정
 # =============================================================================
 DATA_ROOT = '/data/ysj/dataset/LF_video_half'
-LOG_ROOT = '/data/ysj/result/tetrirf/logs/0106_4_128_half'
+LOG_ROOT = '/data/ysj/result/tetrirf/logs/0106_4_128_half_2'
 TEMPLATE_CONFIG = 'configs/LF/template_lf.py'
-EXP_SUFFIX = '0106_4_128_half'
+EXP_SUFFIX = '0106_4_128_half_2'
 
 # 학습 설정
 STEP = 10

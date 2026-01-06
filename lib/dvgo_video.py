@@ -109,14 +109,13 @@ class DirectVoxGO_Video(torch.nn.Module):
     """
     Multi-frame Light Field model using XYUV coordinates.
     """
-    def __init__(self, frameids, xyuv_min, xyuv_max, cfg=None, no_share_grid=False):
+    def __init__(self, frameids, xyuv_min, xyuv_max, cfg=None):
         super(DirectVoxGO_Video, self).__init__()
 
         self.xyuv_min = xyuv_min
         self.xyuv_max = xyuv_max
         self.frameids = frameids
         self.cfg = cfg
-        self.no_share_grid = no_share_grid
         self.dvgos = nn.ModuleDict()
         self.viewbase_pe = cfg.fine_model_and_render.viewbase_pe
         self.fixed_frame = []
@@ -129,7 +128,6 @@ class DirectVoxGO_Video(torch.nn.Module):
             'xyuv_min': self.xyuv_min.cpu().numpy() if torch.is_tensor(self.xyuv_min) else self.xyuv_min,
             'xyuv_max': self.xyuv_max.cpu().numpy() if torch.is_tensor(self.xyuv_max) else self.xyuv_max,
             'viewbase_pe': self.viewbase_pe,
-            'no_share_grid': self.no_share_grid,
         }
 
     def initial_models(self):
@@ -153,17 +151,6 @@ class DirectVoxGO_Video(torch.nn.Module):
             print(f'dvgo_video: initial world_size={world_size}, final_world_size={final_world_size}')
         else:
             world_size = final_world_size
-
-        # share_grid 생성
-        if not self.no_share_grid:
-            self.share_grid = grid.create_grid(
-                self.cfg.fine_model_and_render.k0_type, 
-                channels=self.cfg.fine_model_and_render.rgbnet_dim, 
-                world_size=world_size,
-                xyuv_min=self.xyuv_min, xyuv_max=self.xyuv_max, 
-                config=self.cfg.fine_model_and_render.k0_config).to(device)
-        else:
-            self.share_grid = None
 
         for frameid in self.frameids:
             coarse_ckpt_path = os.path.join(self.cfg.basedir, self.cfg.expname, f'coarse_last_{frameid}.tar')
@@ -200,14 +187,6 @@ class DirectVoxGO_Video(torch.nn.Module):
     def load_checkpoints(self):
         cfg = self.cfg
         ret = []
-
-        # share_grid 로드
-        if self.share_grid is not None:
-            share_grid_path = os.path.join(cfg.basedir, cfg.expname, 'share_grid.tar')
-            if os.path.isfile(share_grid_path):
-                ckpt = torch.load(share_grid_path, weights_only=False)
-                self.share_grid.load_state_dict(ckpt['model_state_dict'])
-                print(f"share_grid loaded from {share_grid_path}")
 
         for frameid in self.frameids:
             frameid_str = str(frameid)
@@ -252,14 +231,6 @@ class DirectVoxGO_Video(torch.nn.Module):
 
     def save_checkpoints(self):
         cfg = self.cfg
-
-        # share_grid 저장
-        if self.share_grid is not None:
-            share_grid_path = os.path.join(cfg.basedir, cfg.expname, 'share_grid.tar')
-            torch.save({
-                'model_state_dict': self.share_grid.state_dict(),
-            }, share_grid_path)
-            print(f"share_grid saved to {share_grid_path}")
 
         for frameid in self.frameids:
             if frameid in self.fixed_frame:
@@ -329,13 +300,11 @@ class DirectVoxGO_Video(torch.nn.Module):
 
         frameid = frame_ids_unique[0]
 
-        ret_frame = self.dvgos[str(frameid)](xyuv, shared_rgbnet=self.rgbnet, shared_grid=self.share_grid, global_step=global_step, mode=mode, **render_kwargs)
+        ret_frame = self.dvgos[str(frameid)](xyuv, shared_rgbnet=self.rgbnet, global_step=global_step, mode=mode, **render_kwargs)
 
         return {'rgb_marched': ret_frame}
 
     def scale_volume_grid(self, scale):
-        if self.share_grid is not None:
-            self.share_grid.scale_volume_grid(scale)
         for frameid in self.frameids:
             if frameid in self.fixed_frame:
                 continue

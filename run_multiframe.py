@@ -48,8 +48,6 @@ def config_parser():
     # training mode
     parser.add_argument("--training_mode", type=int, default=0)
     parser.add_argument('--frame_ids', nargs='+', type=int, help='a list of ID')
-    parser.add_argument("--no_share_grid", action='store_true',
-                        help='do not use shared grid across frames')
 
 
     # testing options
@@ -200,13 +198,11 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
     unique_frame_ids = torch.unique(frame_ids, sorted=True).cpu().numpy().tolist()
 
     # Create model
-    no_share_grid = args.no_share_grid or cfg.fine_model_and_render.get('no_share_grid', False)
     model = dvgo_video.DirectVoxGO_Video(
         frameids=unique_frame_ids,
         xyuv_min=xyuv_min,
         xyuv_max=xyuv_max,
-        cfg=cfg,
-        no_share_grid=no_share_grid
+        cfg=cfg
     )
 
     ret = model.load_checkpoints()
@@ -218,11 +214,7 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
     model = model.cuda()
     
     # Create optimizer
-    if stage == 'coarse':
-        # Coarse stage: only optimize share_grid
-        optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
-    else:
-        optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
+    optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
 
     # Gather training XYUV coordinates
     def gather_training_xyuv():
@@ -232,8 +224,6 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
         frame_id_s = []
 
         training_fids = unique_frame_ids
-        if stage == 'coarse':
-            training_fids = unique_frame_ids[:1] # 첫 번째 프레임만 사용
 
         for fid in training_fids:
             if fid in model.fixed_frame:
@@ -304,10 +294,7 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
                 cur_world_size = [max(w // scale_factor, MIN_GRID_SIZE) for w in final_world_size]
                 print(f'pg_scale: scaling to world_size={cur_world_size}')
                 model.scale_volume_grid(cur_world_size)
-                if stage == 'coarse':
-                    optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
-                else:
-                    optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
+                optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
                 torch.cuda.empty_cache()
 
             if global_step in cfg_train.pg_scale2:
@@ -317,10 +304,7 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
                 cur_world_size = [max(w // scale_factor, MIN_GRID_SIZE) for w in final_world_size]
                 print(f'pg_scale2: scaling to world_size={cur_world_size}')
                 model.scale_volume_grid(cur_world_size)
-                if stage == 'coarse':
-                    optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
-                else:
-                    optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
+                optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
                 torch.cuda.empty_cache()
 
         # Sample batch
@@ -411,7 +395,7 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
             print(f'[iter {global_step}] Train PSNR: {train_psnr_avg:.2f}')
 
         # Test evaluation every 10000 iters
-        if (global_step % 10000 == 0 and stage != 'coarse'):
+        if (global_step % 10000 == 0):
             for frameid in model.dvgos.keys():
                 if int(frameid) in model.fixed_frame:
                     continue
@@ -473,16 +457,6 @@ def train_lf(args, cfg, data_dict):
     xyuv_min_fine = torch.tensor(data_dict['xyuv_min'])
     xyuv_max_fine = torch.tensor(data_dict['xyuv_max'])
     
-    no_share_grid = args.no_share_grid or cfg.fine_model_and_render.get('no_share_grid', False)
-    if cfg.coarse_train.N_iters > 0 and not no_share_grid:
-        print('train_lf: coarse reconstruction start')
-        scene_rep_reconstruction_lf(
-            args=args, cfg=cfg,
-            cfg_model=cfg.fine_model_and_render, cfg_train=cfg.coarse_train,
-            xyuv_min=xyuv_min_fine, xyuv_max=xyuv_max_fine,
-            data_dict=data_dict, stage='coarse'
-        )
-
     scene_rep_reconstruction_lf(
         args=args, cfg=cfg,
         cfg_model=cfg.fine_model_and_render, cfg_train=cfg.fine_train,

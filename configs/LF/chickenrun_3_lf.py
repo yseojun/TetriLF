@@ -1,8 +1,8 @@
 _base_ = '../default.py'
 
 # These will be overwritten by gen_train_all.py
-expname = 'lf_chickenrun_3_0106_4_128_half'
-basedir = '/data/ysj/result/tetrirf/logs/0106_4_128_half'
+expname = 'lf_chickenrun_3_0106_4_128_half_2'
+basedir = '/data/ysj/result/tetrirf/logs/0106_4_128_half_2'
 
 data = dict(
     datadir='/data/ysj/dataset/LF_video_half/chickenrun_3',
@@ -39,7 +39,6 @@ fine_model_and_render = dict(
     dynamic_rgbnet=True,
     viewbase_pe=4,
     stepsize=0.5,
-    no_share_grid=False,
 )
 
 fine_train = dict(
@@ -74,7 +73,7 @@ fine_train = dict(
 )
 
 coarse_train = dict(
-    N_iters=15000,
+    N_iters=0,
     N_rand=16384,
     ray_sampler='flatten',
     lrate_k0=1e-1,

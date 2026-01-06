@@ -39,7 +39,6 @@ fine_model_and_render = dict(
     dynamic_rgbnet=True,
     viewbase_pe=4,
     stepsize=0.5,
-    no_share_grid=False,
 )
 
 fine_train = dict(
@@ -74,7 +73,7 @@ fine_train = dict(
 )
 
 coarse_train = dict(
-    N_iters=15000,
+    N_iters=0,
     N_rand=16384,
     ray_sampler='flatten',
     lrate_k0=1e-1,

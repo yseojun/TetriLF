@@ -98,7 +98,7 @@ class DirectVoxGO(torch.nn.Module):
         # 4D의 경우 4개의 weight 전달
         self.k0.total_variation_add_grad(w, w, w, w, dense_mode)
 
-    def forward(self, xyuv, shared_rgbnet=None, shared_grid=None, global_step=None, mode='feat', **render_kwargs):
+    def forward(self, xyuv, shared_rgbnet=None, global_step=None, mode='feat', **render_kwargs):
         '''Light Field rendering
         @xyuv: [*, 4] the xyuv coordinates (X_cam, Y_cam, U_img, V_img)
         '''
@@ -108,8 +108,6 @@ class DirectVoxGO(torch.nn.Module):
         original_shape = xyuv.shape[:-1]
 
         k0 = self.k0(xyuv)
-        if shared_grid is not None:
-            k0 = k0 + shared_grid(xyuv)
 
         assert shared_rgbnet is not None, 'shared_rgbnet is None'
 

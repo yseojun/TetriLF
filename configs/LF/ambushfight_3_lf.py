@@ -1,8 +1,8 @@
 _base_ = '../default.py'
 
 # These will be overwritten by gen_train_all.py
-expname = 'lf_ambushfight_3_0106_4_128_half'
-basedir = '/data/ysj/result/tetrirf/logs/0106_4_128_half'
+expname = 'lf_ambushfight_3_0106_4_128_half_2'
+basedir = '/data/ysj/result/tetrirf/logs/0106_4_128_half_2'
 
 data = dict(
     datadir='/data/ysj/dataset/LF_video_half/ambushfight_3',
@@ -73,6 +73,13 @@ fine_train = dict(
 )
 
 coarse_train = dict(
-    N_iters=0  # Skip coarse training for LF
+    N_iters=0,
+    N_rand=16384,
+    ray_sampler='flatten',
+    lrate_k0=1e-1,
+    lrate_decay=20,
+    weight_main=1.0,
+    pg_scale=[],
+    pg_scale2=[],
 )
 
