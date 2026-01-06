@@ -73,7 +73,7 @@ fine_train = dict(
 )
 
 coarse_train = dict(
-    N_iters=0,
+    N_iters=15000,
     N_rand=16384,
     ray_sampler='flatten',
     lrate_k0=1e-1,

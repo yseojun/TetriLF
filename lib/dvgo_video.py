@@ -118,6 +118,7 @@ class DirectVoxGO_Video(torch.nn.Module):
         self.cfg = cfg
         self.dvgos = nn.ModuleDict()
         self.viewbase_pe = cfg.fine_model_and_render.viewbase_pe
+        self.share_grid = None
         self.fixed_frame = []
 
         self.initial_models()
@@ -168,6 +169,16 @@ class DirectVoxGO_Video(torch.nn.Module):
                 **model_kwargs)
             
             self.dvgos[frameid_str] = self.dvgos[frameid_str].to(device)
+
+        # share_grid 생성
+        self.share_grid = grid.create_grid(
+            self.cfg.fine_model_and_render.k0_type, 
+            channels=self.cfg.fine_model_and_render.rgbnet_dim, 
+            world_size=world_size,
+            xyuv_min=self.xyuv_min, 
+            xyuv_max=self.xyuv_max, 
+            config=self.cfg.fine_model_and_render.k0_config)
+        self.share_grid = self.share_grid.to(device)
 
         # RGBNet 생성 - Light Field에서는 viewbase_pe 불필요
         if self.cfg.fine_model_and_render.RGB_model == 'MLP':
@@ -227,6 +238,14 @@ class DirectVoxGO_Video(torch.nn.Module):
             checkpoint = torch.load(rgbnet_file, weights_only=False)
             self.rgbnet.load_state_dict(checkpoint['model_state_dict'])
             print('load RGBNet', rgbnet_file)
+
+        # share_grid 로드
+        share_grid_file = os.path.join(cfg.basedir, cfg.expname, 'share_grid.tar')
+        if os.path.isfile(share_grid_file):
+            checkpoint = torch.load(share_grid_file, weights_only=False)
+            self.share_grid.load_state_dict(checkpoint['model_state_dict'])
+            print('load share_grid', share_grid_file)
+
         return ret
 
     def save_checkpoints(self):
@@ -257,6 +276,14 @@ class DirectVoxGO_Video(torch.nn.Module):
         }
         torch.save(rgbnet_ckpt, rgbnet_ckpt_path)
         print(f"RGBNet checkpoint saved to {rgbnet_ckpt_path}")
+
+        # share_grid 저장
+        share_grid_path = os.path.join(cfg.basedir, cfg.expname, 'share_grid.tar')
+        share_grid_ckpt = {
+            'model_state_dict': self.share_grid.state_dict(),
+        }
+        torch.save(share_grid_ckpt, share_grid_path)
+        print(f"share_grid checkpoint saved to {share_grid_path}")
 
     def set_fixedframe(self, ids):
         """Light Field 모드에서는 density가 없으므로 plane만 초기화"""
@@ -300,7 +327,10 @@ class DirectVoxGO_Video(torch.nn.Module):
 
         frameid = frame_ids_unique[0]
 
-        ret_frame = self.dvgos[str(frameid)](xyuv, shared_rgbnet=self.rgbnet, global_step=global_step, mode=mode, **render_kwargs)
+        ret_frame = self.dvgos[str(frameid)](
+            xyuv, shared_rgbnet=self.rgbnet, 
+            share_grid=self.share_grid,
+            global_step=global_step, mode=mode, **render_kwargs)
 
         return {'rgb_marched': ret_frame}
 
@@ -310,6 +340,9 @@ class DirectVoxGO_Video(torch.nn.Module):
                 continue
             frameid_str = str(frameid)
             self.dvgos[frameid_str].scale_volume_grid(scale)
+        
+        if self.share_grid is not None:
+            self.share_grid.scale_volume_grid(scale)
 
     def density_total_variation_add_grad(self, weight, dense_mode, frameids):
         # Light Field 모드에서는 density가 없으므로 pass

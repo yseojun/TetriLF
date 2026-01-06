@@ -74,7 +74,7 @@ def config_parser():
 @torch.no_grad()
 def render_viewpoints_lf(model, xyuv_coords, HW, gt_imgs=None, savedir=None, dump_images=False,
                          eval_ssim=False, eval_lpips_alex=False, eval_lpips_vgg=False,
-                         frame_id=0, shared_rgbnet=None):
+                         frame_id=0, shared_rgbnet=None, share_grid=None):
     '''Render images for Light Field model using XYUV coordinates.
     
     Args:
@@ -86,6 +86,7 @@ def render_viewpoints_lf(model, xyuv_coords, HW, gt_imgs=None, savedir=None, dum
         dump_images: whether to save images
         frame_id: frame id for logging
         shared_rgbnet: shared RGB network
+        share_grid: shared plane grid
     '''
     rgbs = []
     psnrs = []
@@ -105,7 +106,7 @@ def render_viewpoints_lf(model, xyuv_coords, HW, gt_imgs=None, savedir=None, dum
         end_event = torch.cuda.Event(enable_timing=True)
         
         start_event.record()
-        rgb = model(xyuv, shared_rgbnet=shared_rgbnet)  # [H, W, 3]
+        rgb = model(xyuv, shared_rgbnet=shared_rgbnet, share_grid=share_grid)  # [H, W, 3]
         end_event.record()
         torch.cuda.synchronize()
         forward_time = start_event.elapsed_time(end_event)  # milliseconds
@@ -181,7 +182,97 @@ def load_everything_lf(args, cfg):
     return data_dict
 
 
-def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_max, data_dict, stage):
+def coarse_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_max, data_dict):
+    """share_grid만 학습하는 coarse 단계."""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Extract data
+    images = data_dict['images']
+    xyuv_coords = data_dict['xyuv']
+    frame_ids = data_dict['frame_ids']
+    i_train = data_dict['i_train']
+
+    unique_frame_ids = torch.unique(frame_ids, sorted=True).cpu().numpy().tolist()
+    first_fid = unique_frame_ids[0]
+
+    # Create model
+    model = dvgo_video.DirectVoxGO_Video(
+        frameids=unique_frame_ids,
+        xyuv_min=xyuv_min,
+        xyuv_max=xyuv_max,
+        cfg=cfg
+    ).cuda()
+
+    # Freeze everything except share_grid
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    if model.share_grid is not None:
+        for param in model.share_grid.parameters():
+            param.requires_grad = True
+    else:
+        raise ValueError("model.share_grid is None")
+
+    # Optimizer for share_grid only
+    optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
+
+    # First frame training data only
+    id_mask = (frame_ids.cpu() == first_fid)
+    train_mask = np.zeros(len(frame_ids), dtype=bool)
+    train_mask[i_train] = True
+    combined_mask = id_mask.numpy() & train_mask
+    t_train = np.where(combined_mask)[0]
+
+    xyuv_tr_s = []
+    rgb_tr_s = []
+    for idx in t_train:
+        img_flat = images[idx].reshape(-1, 3)
+        xyuv_flat = xyuv_coords[idx].reshape(-1, 4)
+        xyuv_tr_s.append(xyuv_flat)
+        rgb_tr_s.append(img_flat)
+    
+    index_generator = dvgo.batch_indices_generator_MF(rgb_tr_s, cfg_train.N_rand)
+    batch_index_sampler = lambda: next(index_generator)
+
+    print(f'Coarse training on frame {first_fid} for {cfg_train.N_iters} iterations')
+    
+    time0 = time.time()
+    for global_step in trange(1, 1 + cfg_train.N_iters):
+        camera_id, sel_i = batch_index_sampler()
+        target = rgb_tr_s[camera_id][sel_i].to(device)
+        xyuv = xyuv_tr_s[camera_id][sel_i].to(device)
+        
+        # We need a frameid for the forward pass, even if we only care about share_grid
+        fid_tensor = torch.ones(xyuv.shape[0], dtype=torch.long, device=device) * first_fid
+        
+        optimizer.zero_grad()
+        # Coarse stage에서는 share_grid와 fixed frame의 k0를 사용할 수 있음
+        # 하지만 목표는 share_grid 학습이므로, k0는 초기화된 상태일 것임
+        render_result = model(xyuv, frame_ids=fid_tensor, global_step=global_step)
+        rgb_pred = render_result['rgb_marched']
+        
+        loss = cfg_train.weight_main * F.mse_loss(rgb_pred, target)
+        loss.backward()
+        optimizer.step()
+
+        # Learning rate decay
+        decay_steps = cfg_train.lrate_decay * 1000
+        decay_factor = 0.1 ** (1/decay_steps)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = param_group['lr'] * decay_factor
+
+        if global_step % args.i_print == 0 or global_step == 1:
+            psnr = utils.mse2psnr(loss.detach())
+            tqdm.write(f'Coarse reconstruction: iter {global_step:6d} / Loss: {loss.item():.9f} / PSNR: {psnr:.2f}')
+
+    # Save coarse result
+    share_grid_path = os.path.join(cfg.basedir, cfg.expname, 'share_grid.tar')
+    torch.save({'model_state_dict': model.share_grid.state_dict()}, share_grid_path)
+    print(f'Saved coarse share_grid to {share_grid_path}')
+    return model.share_grid
+
+
+def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_max, data_dict, stage, share_grid=None):
     """Light Field 학습을 위한 scene reconstruction."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -204,6 +295,10 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
         xyuv_max=xyuv_max,
         cfg=cfg
     )
+
+    if share_grid is not None:
+        model.share_grid.load_state_dict(share_grid.state_dict())
+        print('Using pre-trained share_grid')
 
     ret = model.load_checkpoints()
 
@@ -423,6 +518,7 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
                     eval_lpips_vgg=args.eval_lpips_vgg,
                     frame_id=frameid,
                     shared_rgbnet=model.rgbnet,
+                    share_grid=model.share_grid,
                 )
                 print('iter:', global_step, 'test_psnr:', res_psnr, 'test_forward_time:', f'{test_forward_time:.2f}ms')
 
@@ -457,11 +553,21 @@ def train_lf(args, cfg, data_dict):
     xyuv_min_fine = torch.tensor(data_dict['xyuv_min'])
     xyuv_max_fine = torch.tensor(data_dict['xyuv_max'])
     
+    # Coarse reconstruction (share_grid only)
+    share_grid = coarse_reconstruction_lf(
+        args=args, cfg=cfg,
+        cfg_model=cfg.fine_model_and_render, cfg_train=cfg.coarse_train,
+        xyuv_min=xyuv_min_fine, xyuv_max=xyuv_max_fine,
+        data_dict=data_dict
+    )
+
+    # Fine reconstruction
     scene_rep_reconstruction_lf(
         args=args, cfg=cfg,
         cfg_model=cfg.fine_model_and_render, cfg_train=cfg.fine_train,
         xyuv_min=xyuv_min_fine, xyuv_max=xyuv_max_fine,
-        data_dict=data_dict, stage='fine'
+        data_dict=data_dict, stage='fine',
+        share_grid=share_grid
     )
     
     eps_fine = time.time() - eps_time
