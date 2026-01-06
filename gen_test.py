@@ -7,7 +7,7 @@ import json
 
 step = 20
 
-names = ['sport2']
+names = ['ambushfight_1']
 
 for name in names:
 
@@ -17,7 +17,7 @@ for name in names:
 
         for i in range(0,200,step):
             tmp = " ".join([str(j) for j in range(i,i+step)])
-            f.write(f"python render.py --config configs/NHR_RERF/{name}.py  --frame_ids {tmp} --render_only --render_test --reald \n" )
+            f.write(f"python render_lf.py --config configs/LF/{name}_lf.py  --frame_ids {tmp} --render_only --render_test --reald \n" )
 
     print(filename)
     os.system(f'sh {filename}')

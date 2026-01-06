@@ -78,9 +78,7 @@ if __name__=='__main__':
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('--dir', required=True,
-                        help='raw files director path')
-
-
+                        help='compressed files directory path')
 
     parser.add_argument('--model_template', type=str, default='fine_last_0.tar',
                         help='model template')
@@ -91,6 +89,8 @@ if __name__=='__main__':
     parser.add_argument("--codec", type=str, default='h265',
                         help='h265 or mpg2')
 
+    parser.add_argument("--no_wandb", action='store_true',
+                        help='disable wandb logging')
 
     args = parser.parse_args()
 
@@ -102,17 +102,30 @@ if __name__=='__main__':
 
     ckpt = torch.load(os.path.join(args.dir, '..', args.model_template), weights_only=False)
 
-    name = args.dir.split('/')[-2]
-    wandbrun = wandb.init(
-        # set the wandb project where this run will be logged
-        project="TeTriRF",
+    # Load metadata from planes_frame_meta.nf
+    meta_file = os.path.join(args.dir, 'planes_frame_meta.nf')
+    assert os.path.isfile(meta_file), f"Metadata file not found: {meta_file}"
+    meta = torch.load(meta_file, weights_only=False)
     
-        # track hyperparameters and run metadata
-        resume = "allow",
-         id = 'compressionV7_'+name+'_'+args.codec,
-    )
+    low_bound, high_bound = meta['bounds']
+    plane_sizes = meta['plane_size']
+    density_size = meta.get('density_size', None)
+    qp = meta.get('qp', 0)
+
+    name = args.dir.split('/')[-2]
+    wandbrun = None
+    if not args.no_wandb:
+        wandbrun = wandb.init(
+            # set the wandb project where this run will be logged
+            project="TeTriRF",
+        
+            # track hyperparameters and run metadata
+            resume = "allow",
+            id = 'compressionV7_'+name+'_'+args.codec,
+        )
 
 
+    # Decode videos to PNG frames using ffmpeg
     filename = '/dev/shm/videos_to_planes.sh'
     with open(filename,'w') as f:
         f.write(f'cd {args.dir}\n')
@@ -128,74 +141,67 @@ if __name__=='__main__':
             f.write(f"ffmpeg -y -i density_planes.mp4  -pix_fmt gray16be  density_frame_%d_out.png\n")
     os.system(f"bash {filename}")
 
-    fpsnr = []
-    dpsnr = []
-    for frameid in tqdm(range(0, args.numframe,10)):
-        raw_frame = torch.load(os.path.join(args.dir, f'planes_frame_{frameid}.nf'), weights_only=False)
+    # Process each frame
+    for frameid in tqdm(range(0, args.numframe)):
 
-        low_bound,high_bound = raw_frame['bounds']
-
-        
-        gt_planes = raw_frame['planes']
-
-        tpsnr = []
-
-        for key in raw_frame['img'].keys():
-            #ipdb.set_trace()
-            quant_img = cv2.imread(os.path.join(args.dir,f"{key.split('_')[0]}_planes_frame_{frameid+1}_out.png"), -1)
-
-            #ipdb.set_trace()
-            plane = untile_image(torch.tensor(quant_img.astype(np.float32))/int(2**16-1), 
-                                raw_frame['plane_size'][key][2],
-                                raw_frame['plane_size'][key][3],
-                                raw_frame['plane_size'][key][1])
-
-            tpsnr.append(psnr(plane, (gt_planes[key].cpu()-low_bound)/(high_bound-low_bound)).item())
+        # Restore feature planes
+        for p in ['xy', 'xz', 'yz']:
+            key = f'{p}_plane'
+            quant_img = cv2.imread(os.path.join(args.dir, f"{p}_planes_frame_{frameid+1}_out.png"), -1)
             
+            if quant_img is None:
+                tqdm.write(f"Warning: Could not read {p}_planes_frame_{frameid+1}_out.png, skipping frame {frameid}")
+                continue
 
-            plane = plane*(high_bound-low_bound) + low_bound
+            # Untile image to get feature plane
+            plane = untile_image(
+                torch.tensor(quant_img.astype(np.float32)) / int(2**16-1), 
+                plane_sizes[key][2],  # height
+                plane_sizes[key][3],  # width
+                plane_sizes[key][1]   # num channels
+            )
 
+            # Dequantize: convert from [0,1] back to original range
+            plane = plane * (high_bound - low_bound) + low_bound
 
-            assert 'k0.'+key in ckpt['model_state_dict'], ' Wrong plane name'
+            assert 'k0.' + key in ckpt['model_state_dict'], f'Wrong plane name: k0.{key}'
+            ckpt['model_state_dict']['k0.' + key] = plane.clone().cuda()
 
-            ckpt['model_state_dict']['k0.'+key] = plane.clone().cuda()
-
- 
-
+        # Restore density
+        quant_img = cv2.imread(os.path.join(args.dir, f"density_frame_{frameid+1}_out.png"), -1)
         
+        if quant_img is None:
+            tqdm.write(f"Warning: Could not read density_frame_{frameid+1}_out.png, skipping frame {frameid}")
+            continue
 
-        quant_img = cv2.imread(os.path.join(args.dir,f"density_frame_{frameid+1}_out.png"), -1)
-        gt_quant_img = make_density_image(raw_frame['density'],int(2**16-1), h = quant_img.shape[0],w = quant_img.shape[1])
-        desity_plane = untile_image(torch.tensor(quant_img.astype(np.float32))/int(2**16-1), 
-                                raw_frame['density'].size(2),
-                                raw_frame['density'].size(3),
-                                raw_frame['density'].size(1))
+        # Get density size from metadata or from checkpoint
+        # density.grid shape: [batch=1, channel=1, D, H, W]
+        if density_size is not None:
+            d_depth = density_size[2]   # D (number of depth slices = number of tiles)
+            d_height = density_size[3]  # H (height of each slice)
+            d_width = density_size[4]   # W (width of each slice)
+        else:
+            # Fallback: get from checkpoint
+            orig_density = ckpt['model_state_dict']['density.grid']
+            d_depth = orig_density.size(2)
+            d_height = orig_density.size(3)
+            d_width = orig_density.size(4)
 
-        desity_plane = desity_plane*(30+5) - 5
-        
-        dpsnr.append(psnr(torch.tensor(quant_img.astype(np.float32))/int(2**16-1), gt_quant_img).item())
+        # untile_image returns [1, ndim, h, w] where ndim=D, h=H, w=W
+        density_plane = untile_image(
+            torch.tensor(quant_img.astype(np.float32)) / int(2**16-1), 
+            d_height,  # h
+            d_width,   # w
+            d_depth    # ndim (number of depth slices)
+        )
 
- 
+        # Dequantize density: convert from [0,1] back to original range [-5, 30]
+        density_plane = density_plane * (30 + 5) - 5
 
-        fpsnr.append(np.mean(tpsnr))
-        tqdm.write(f"Reconstruction PSNR {np.mean(tpsnr)}")
+        ckpt['model_state_dict']['density.grid'] = density_plane.clone().cuda().unsqueeze(0)
 
-        tqdm.write(f"Reconstruction Density PSNR {psnr(torch.tensor(quant_img.astype(np.float32))/int(2**16-1), gt_quant_img).item()}")
-
-
-        ckpt['model_state_dict']['density.grid'] = desity_plane.clone().cuda().unsqueeze(0)
-
-        
+        # Save restored checkpoint
         torch.save(ckpt, os.path.join(outdir, f'fine_last_{frameid}.tar'))
+        tqdm.write(f"Saved restored model: fine_last_{frameid}.tar")
 
-
-
-
-    data = [[x, y] for (x, y) in zip(range(len(fpsnr)), fpsnr)]
-    table = wandb.Table(data=data, columns = ["frame", "psnr"])
-
-    data_d = [[x, y] for (x, y) in zip(range(len(dpsnr)), dpsnr)]
-    table_d = wandb.Table(data=data_d, columns = ["frame", "psnr"])
-
-    wandbrun.log({"Reconstruction_Feat_PSNR" : wandb.plot.line(table, "frame", "psnr",
-            title=f"Reconstruction Feature PSNR  qp:{raw_frame['qp']}")})
+    print(f"\nRestoration complete! Output saved to: {outdir}")

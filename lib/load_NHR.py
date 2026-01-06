@@ -347,7 +347,7 @@ class NHR_Dataset(torch.utils.data.Dataset):
                 tmp.append(j)
         self.test_views = tmp
 
-        
+
 
 
         if len(self.test_views)==0:

@@ -2,6 +2,7 @@ import numpy as np
 
 from .load_llff import load_llff_data, LLFF_Dataset
 from .load_NHR import NHR_Dataset
+from .load_LF import LF_Dataset
 from torch.utils.data import DataLoader
 import ipdb
 import tqdm
@@ -81,10 +82,37 @@ def load_data(args):
             far = np.ndarray.max(bds) * 1.
         print('NEAR FAR', near, far)
 
-        
+        # data_dict for llff
+        H, W, focal = hwf
+        H, W = int(H), int(W)
+        hwf = [H, W, focal]
+        HW = np.array([im.shape[:2] for im in images])
+        irregular_shape = (images.dtype is np.dtype('object'))
 
+        if K is None:
+            K = np.array([
+                [focal, 0, 0.5*W],
+                [0, focal, 0.5*H],
+                [0, 0, 1]
+            ])
 
+        if len(K.shape) == 2:
+            Ks = K[None].repeat(len(poses), axis=0)
+        else:
+            Ks = K
 
+        render_poses = render_poses[...,:4]
+
+        data_dict = dict(
+            hwf=hwf, HW=HW, Ks=Ks,
+            near=near, far=far, near_clip=near_clip,
+            i_train=i_train, i_val=i_val, i_test=i_test,
+            poses=poses, render_poses=render_poses,
+            images=images, depths=depths,
+            irregular_shape=irregular_shape,
+            frame_ids=frame_ids, masks=masks,
+        )
+        return data_dict
 
 
     elif args.dataset_type == 'NHR':
@@ -183,40 +211,152 @@ def load_data(args):
                 images = images[...,:3]*masks + (1.-masks)
             else:
                 images = images[...,:3]
+
+        # Cast intrinsics to right types
+        H, W, focal = hwf
+        H, W = int(H), int(W)
+        hwf = [H, W, focal]
+        HW = np.array([im.shape[:2] for im in images])
+        irregular_shape = (images.dtype is np.dtype('object'))
+
+        if K is None:
+            K = np.array([
+                [focal, 0, 0.5*W],
+                [0, focal, 0.5*H],
+                [0, 0, 1]
+            ])
+
+        if len(K.shape) == 2:
+            Ks = K[None].repeat(len(poses), axis=0)
+        else:
+            Ks = K
+
+        render_poses = render_poses[...,:4]
+
+        data_dict = dict(
+            hwf=hwf, HW=HW, Ks=Ks,
+            near=near, far=far, near_clip=near_clip,
+            i_train=i_train, i_val=i_val, i_test=i_test,
+            poses=poses, render_poses=render_poses,
+            images=images, depths=depths,
+            irregular_shape=irregular_shape,
+            frame_ids=frame_ids, masks=masks,
+        )
+        return data_dict
+
+
+    elif args.dataset_type == 'LF':
+        # Light Field dataset - use DataLoader for parallel loading (like NHR)
+        args.frame_ids.sort()
+        
+        # Get optional parameters with defaults
+        uv_scale = getattr(args, 'uv_scale', 1.0)
+        st_scale = getattr(args, 'st_scale', 0.25)
+        grid_size_x = getattr(args, 'grid_size_x', None)
+        grid_size_y = getattr(args, 'grid_size_y', None)
+        test_views = getattr(args, 'test_frames', [])
+        
+        # Create dataset
+        dataset = LF_Dataset(
+            basedir=args.datadir,
+            frameids=args.frame_ids,
+            test_views=test_views,
+            grid_size_x=grid_size_x,
+            grid_size_y=grid_size_y,
+            uv_scale=uv_scale,
+            st_scale=st_scale
+        )
+        
+        # Collate function for DataLoader
+        def lf_collate_fn(batch):
+            assert len(batch) == 1
+            return batch[0][0], batch[0][1], batch[0][2]  # images, xyuv, frame_id
+        
+        # Use DataLoader for parallel loading (like NHR)
+        train_dataloader = DataLoader(
+            dataset, batch_size=1, num_workers=8, 
+            shuffle=False, collate_fn=lf_collate_fn
+        )
+        
+        # Collect data from all frames
+        all_images = []
+        all_xyuv = []
+        all_frame_ids = []
+        
+        for images_t, xyuv_t, frame_id in train_dataloader:
+            n_views = images_t.size(0)
+            all_images.append(images_t)
+            all_xyuv.append(xyuv_t)
+            all_frame_ids.append(torch.ones(n_views, dtype=torch.long) * frame_id)
+        
+        # Concatenate all data
+        all_images = torch.cat(all_images, dim=0).numpy()
+        all_xyuv = torch.cat(all_xyuv, dim=0).numpy()
+        frame_ids = torch.cat(all_frame_ids)
+        
+        # Get bounds and dimensions
+        xyuv_min, xyuv_max = dataset.get_xyuv_bounds()
+        H, W = dataset.H, dataset.W
+        num_views = dataset.num_views
+        n_total = len(all_images)
+        
+        # Create train/test split based on view indices
+        # test_views contains view indices that should be used for testing
+        all_view_ids = []
+        for frame_id in args.frame_ids:
+            all_view_ids.extend(range(num_views))
+        all_view_ids = np.array(all_view_ids)
+        
+        test_indices = []
+        for i in range(n_total):
+            if all_view_ids[i] in test_views:
+                test_indices.append(i)
+        
+        train_indices = [i for i in range(n_total) if i not in test_indices]
+        
+        if len(test_indices) == 0:
+            # Use 10% for test if no test views specified
+            test_indices = train_indices[::10]
+        
+        i_train = np.array(train_indices)
+        i_test = np.array(test_indices)
+        i_val = np.array(test_indices)
+        
+        # LF doesn't need near/far/poses for volume rendering
+        near = 0.0
+        far = 1.0
+        masks = None
+        
+        print(f'Loaded LF dataset: {all_images.shape}, xyuv: {all_xyuv.shape}')
+        print(f'XYUV bounds: min={xyuv_min}, max={xyuv_max}')
+        print(f'Train: {len(i_train)}, Test: {len(i_test)}')
+        
+        # Return LF-specific data dict
+        HW = np.array([[H, W]] * n_total)
+        data_dict = dict(
+            hwf=[H, W, 1.0],  # focal not used in LF
+            HW=HW,
+            Ks=None,  # Not used in LF
+            near=near, far=far, near_clip=near_clip,
+            i_train=i_train, i_val=i_val, i_test=i_test,
+            poses=None,  # Not used in LF
+            render_poses=None,
+            images=all_images,
+            xyuv=all_xyuv,  # LF-specific: XYUV coordinates
+            xyuv_min=xyuv_min,  # LF-specific
+            xyuv_max=xyuv_max,  # LF-specific
+            depths=depths,
+            irregular_shape=False,
+            frame_ids=frame_ids,
+            masks=masks,
+            grid_size_x=dataset.grid_size_x,
+            grid_size_y=dataset.grid_size_y,
+            num_views=num_views,
+        )
+        return data_dict
+
     else:
         raise NotImplementedError(f'Unknown dataset type {args.dataset_type} exiting')
-
-    # Cast intrinsics to right types
-    H, W, focal = hwf
-    H, W = int(H), int(W)
-    hwf = [H, W, focal]
-    HW = np.array([im.shape[:2] for im in images])
-    irregular_shape = (images.dtype is np.dtype('object'))
-
-    if K is None:
-        K = np.array([
-            [focal, 0, 0.5*W],
-            [0, focal, 0.5*H],
-            [0, 0, 1]
-        ])
-
-    if len(K.shape) == 2:
-        Ks = K[None].repeat(len(poses), axis=0)
-    else:
-        Ks = K
-
-    render_poses = render_poses[...,:4]
-
-    data_dict = dict(
-        hwf=hwf, HW=HW, Ks=Ks,
-        near=near, far=far, near_clip=near_clip,
-        i_train=i_train, i_val=i_val, i_test=i_test,
-        poses=poses, render_poses=render_poses,
-        images=images, depths=depths,
-        irregular_shape=irregular_shape,
-        frame_ids = frame_ids, masks= masks,
-    )
-    return data_dict
 
 
 def inward_nearfar_heuristic(cam_o, ratio=0.05):
@@ -226,4 +366,3 @@ def inward_nearfar_heuristic(cam_o, ratio=0.05):
                       # lib/dvgo use 1e9 as far
     near = far * ratio
     return near, far
-

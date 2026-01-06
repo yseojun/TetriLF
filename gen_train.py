@@ -4,7 +4,7 @@ import json
 
 
 # change the config file here
-config_file = "configs/NHR_RERF/basketball.py"
+config_file = "configs/LF/ambushfight_5_lf.py"
 step = 20
 overlap = True
 
@@ -12,7 +12,7 @@ filename = './run.sh'
 with open(filename,'w') as f:
     
 
-    for i in range(0,200,step):
+    for i in range(0,20,step):
         if i!=0 and overlap:
             tmp = " ".join([str(j) for j in range(i-1,i+step)])
         else:

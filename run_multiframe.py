@@ -19,20 +19,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from lib import utils, dvgo,  dmpigo, dvgo_video
+from lib import utils, dvgo, dvgo_video
 from lib.load_data import load_data
 from torch.utils.data import DataLoader
 
-from torch_efficient_distloss import flatten_eff_distloss
 import pandas as pd
 
 os.environ['CUDA_VISIBLE_DEVICES']='0'
-
-# 디버거 자동 실행 비활성화
-# def excepthook(exc_type, exc_value, exc_traceback):
-#     ipdb.post_mortem(exc_traceback)
-# 
-# sys.excepthook = excepthook
 
 wandbrun=None
 
@@ -77,6 +70,427 @@ def config_parser():
                         help='frequency of weight ckpt saving')
     return parser
 
+
+@torch.no_grad()
+def render_viewpoints_lf(model, xyuv_coords, HW, gt_imgs=None, savedir=None, dump_images=False,
+                         eval_ssim=False, eval_lpips_alex=False, eval_lpips_vgg=False,
+                         frame_id=0, shared_rgbnet=None):
+    '''Render images for Light Field model using XYUV coordinates.
+    
+    Args:
+        model: DirectVoxGO model for a specific frame
+        xyuv_coords: [N_views, H, W, 4] XYUV coordinates
+        HW: [N_views, 2] height and width
+        gt_imgs: optional ground truth images for evaluation
+        savedir: directory to save rendered images
+        dump_images: whether to save images
+        frame_id: frame id for logging
+        shared_rgbnet: shared RGB network
+    '''
+    rgbs = []
+    psnrs = []
+    ssims = []
+    lpips_alex = []
+    lpips_vgg = []
+    forward_times = []
+
+    device = next(model.parameters()).device
+
+    for i in tqdm(range(len(xyuv_coords)), desc=f'Rendering frame {frame_id}'):
+        H, W = HW[i]
+        xyuv = torch.from_numpy(xyuv_coords[i]).float().to(device)  # [H, W, 4]
+        
+        # Forward pass through model with CUDA timing
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
+        rgb = model(xyuv, shared_rgbnet=shared_rgbnet)  # [H, W, 3]
+        end_event.record()
+        torch.cuda.synchronize()
+        forward_time = start_event.elapsed_time(end_event)  # milliseconds
+        forward_times.append(forward_time)
+        
+        rgb = rgb.cpu().numpy()
+        
+        rgbs.append(rgb)
+        
+        if i == 0:
+            print('Testing', rgb.shape)
+
+        if gt_imgs is not None:
+            gt = gt_imgs[i]
+            p = -10. * np.log10(np.mean(np.square(rgb - gt)))
+            psnrs.append(p)
+            if eval_ssim:
+                ssims.append(utils.rgb_ssim(rgb, gt, max_val=1))
+            if eval_lpips_alex:
+                lpips_alex.append(utils.rgb_lpips(rgb, gt, net_name='alex', device=device))
+            if eval_lpips_vgg:
+                lpips_vgg.append(utils.rgb_lpips(rgb, gt, net_name='vgg', device=device))
+
+    res_psnr = None
+    avg_forward_time = np.mean(forward_times) if forward_times else 0
+    
+    if len(psnrs):
+        print('Testing psnr', np.mean(psnrs), '(avg)')
+        res_psnr = np.mean(psnrs)
+        if eval_ssim: print('Testing ssim', np.mean(ssims), '(avg)')
+        if eval_lpips_vgg: print('Testing lpips (vgg)', np.mean(lpips_vgg), '(avg)')
+        if eval_lpips_alex: print('Testing lpips (alex)', np.mean(lpips_alex), '(avg)')
+    
+    print(f'Testing forward time: {avg_forward_time:.2f}ms (avg)')
+
+    if savedir is not None and dump_images:
+        for i in trange(len(rgbs)):
+            rgb8 = utils.to8b(rgbs[i])
+            filename = os.path.join(savedir, '{:03d}.jpg'.format(i))
+            imageio.imwrite(filename, rgb8)
+
+    rgbs = np.array(rgbs)
+
+    return rgbs, res_psnr, avg_forward_time
+
+
+def seed_everything():
+    '''Seed everything for better reproducibility.
+    '''
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
+
+
+def load_everything_lf(args, cfg):
+    '''Load Light Field data with XYUV coordinates.
+    '''
+    data_dict = load_data(cfg.data)
+
+    # LF specific keys
+    kept_keys = {'hwf', 'HW', 'i_train', 'i_val', 'i_test', 'irregular_shape',
+                 'images', 'frame_ids', 'xyuv', 'xyuv_min', 'xyuv_max',
+                 'masks', 'grid_size_x', 'grid_size_y', 'num_views'}
+    for k in list(data_dict.keys()):
+        if k not in kept_keys:
+            data_dict.pop(k)
+
+    # Convert to tensors
+    if not data_dict['irregular_shape']:
+        data_dict['images'] = torch.FloatTensor(data_dict['images'])
+        data_dict['xyuv'] = torch.FloatTensor(data_dict['xyuv'])
+    
+    return data_dict
+
+
+def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_max, data_dict, stage):
+    """Light Field 학습을 위한 scene reconstruction."""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Extract data
+    HW = data_dict['HW']
+    i_train = data_dict['i_train']
+    i_val = data_dict['i_val']
+    i_test = data_dict['i_test']
+    images = data_dict['images']
+    xyuv_coords = data_dict['xyuv']
+    frame_ids = data_dict['frame_ids']
+
+    frame_ids_cpu = frame_ids.cpu()
+    unique_frame_ids = torch.unique(frame_ids, sorted=True).cpu().numpy().tolist()
+
+    # Create model
+    model = dvgo_video.DirectVoxGO_Video(
+        frameids=unique_frame_ids,
+        xyuv_min=xyuv_min,
+        xyuv_max=xyuv_max,
+        cfg=cfg
+    )
+
+    ret = model.load_checkpoints()
+
+    if not cfg.fine_model_and_render.dynamic_rgbnet and args.training_mode > 0:
+        cfg.fine_train.lrate_rgbnet = 0
+
+    model.set_fixedframe(ret)
+    model = model.cuda()
+    
+    # Create optimizer
+    if stage == 'coarse':
+        # Coarse stage: only optimize share_grid
+        optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
+    else:
+        optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
+
+    # Gather training XYUV coordinates
+    def gather_training_xyuv():
+        """XYUV 좌표와 RGB 타겟 수집"""
+        xyuv_tr_s = []
+        rgb_tr_s = []
+        frame_id_s = []
+
+        training_fids = unique_frame_ids
+        if stage == 'coarse':
+            training_fids = unique_frame_ids[:1] # 첫 번째 프레임만 사용
+
+        for fid in training_fids:
+            if fid in model.fixed_frame:
+                continue
+            
+            # 해당 프레임의 train 인덱스 찾기
+            id_mask = (frame_ids_cpu == fid)
+            train_mask = np.zeros(len(frame_ids_cpu), dtype=bool)
+            train_mask[i_train] = True
+            combined_mask = id_mask.numpy() & train_mask
+            t_train = np.where(combined_mask)[0]
+            
+            if len(t_train) == 0:
+                continue
+            
+            # 각 뷰의 데이터 flatten
+            for idx in t_train:
+                img = images[idx]  # [H, W, 3]
+                xyuv = xyuv_coords[idx]  # [H, W, 4]
+                
+                # Flatten
+                img_flat = img.reshape(-1, 3)  # [H*W, 3]
+                xyuv_flat = xyuv.reshape(-1, 4)  # [H*W, 4]
+                
+                if cfg.data.load2gpu_on_the_fly:
+                    xyuv_tr_s.append(xyuv_flat.cpu())
+                    rgb_tr_s.append(img_flat.cpu())
+                else:
+                    xyuv_tr_s.append(xyuv_flat.to(device))
+                    rgb_tr_s.append(img_flat.to(device))
+                
+                frame_id_s.append(torch.ones(img_flat.shape[0], dtype=torch.long) * fid)
+        
+        if len(xyuv_tr_s) == 0:
+            raise ValueError("No training data found!")
+        
+        print(f'Gathered {len(xyuv_tr_s)} views for training, first view size: {xyuv_tr_s[0].shape}')
+        
+        # Batch sampler
+        index_generator = dvgo.batch_indices_generator_MF(rgb_tr_s, cfg_train.N_rand)
+        batch_index_sampler = lambda: next(index_generator)
+        
+        return xyuv_tr_s, rgb_tr_s, frame_id_s, batch_index_sampler
+
+    xyuv_tr, rgb_tr, frame_id_tr, batch_index_sampler = gather_training_xyuv()
+
+    # Training loop
+    torch.cuda.empty_cache()
+    psnr_lst = []
+    forward_time_lst = []
+    time0 = time.time()
+    global_step = -1
+
+    psnr_res = []
+    time_res = []
+
+    for global_step in trange(1, 1 + cfg_train.N_iters):
+
+        # Progressive scaling (world_size 기반)
+        # bilinear interpolation을 위해 최소 크기 2 보장
+        MIN_GRID_SIZE = 2
+        if args.training_mode != -1:
+            final_world_size = list(cfg.data.world_size)
+            
+            if global_step in cfg_train.pg_scale:
+                n_rest_scales = len(cfg_train.pg_scale) - cfg_train.pg_scale.index(global_step) - 1
+                scale_factor = 2 ** n_rest_scales
+                cur_world_size = [max(w // scale_factor, MIN_GRID_SIZE) for w in final_world_size]
+                print(f'pg_scale: scaling to world_size={cur_world_size}')
+                model.scale_volume_grid(cur_world_size)
+                if stage == 'coarse':
+                    optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
+                else:
+                    optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
+                torch.cuda.empty_cache()
+
+            if global_step in cfg_train.pg_scale2:
+                print('**Second Level PG****')
+                n_rest_scales = len(cfg_train.pg_scale2) - cfg_train.pg_scale2.index(global_step) - 1
+                scale_factor = 2 ** n_rest_scales
+                cur_world_size = [max(w // scale_factor, MIN_GRID_SIZE) for w in final_world_size]
+                print(f'pg_scale2: scaling to world_size={cur_world_size}')
+                model.scale_volume_grid(cur_world_size)
+                if stage == 'coarse':
+                    optimizer = torch.optim.Adam(model.share_grid.parameters(), lr=cfg_train.lrate_k0)
+                else:
+                    optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
+                torch.cuda.empty_cache()
+
+        # Sample batch
+        camera_id, sel_i = batch_index_sampler()
+        sel_i = torch.from_numpy(sel_i)
+        
+        while sel_i.size(0) == 0:
+            print('while loop: empty batch')
+            camera_id, sel_i = batch_index_sampler()
+
+        frameids = frame_id_tr[camera_id][sel_i]
+        target = rgb_tr[camera_id][sel_i]
+        xyuv = xyuv_tr[camera_id][sel_i]
+
+        if cfg.data.load2gpu_on_the_fly:
+            target = target.to(device)
+            xyuv = xyuv.to(device)
+
+        # Forward pass with CUDA timing
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        
+        start_event.record()
+        render_result = model(
+            xyuv, frame_ids=frameids,
+            global_step=global_step, mode='feat'
+        )
+        end_event.record()
+        torch.cuda.synchronize()
+        forward_time = start_event.elapsed_time(end_event)  # milliseconds
+
+        # Loss computation
+        optimizer.zero_grad(set_to_none=True)
+        rgb_pred = render_result['rgb_marched']
+        loss = cfg_train.weight_main * F.mse_loss(rgb_pred, target)
+        psnr = utils.mse2psnr(loss.detach())
+            
+        l1loss = torch.tensor(0.0)
+        if stage == 'fine':
+            l1loss = model.compute_k0_l1_loss(frameids)
+            loss += cfg.fine_train.weight_l1_loss * l1loss
+
+        loss.backward()
+        optimizer.step()
+        psnr_lst.append(psnr.item())
+        forward_time_lst.append(forward_time)
+
+        # Update learning rate
+        decay_steps = cfg_train.lrate_decay * 1000
+        decay_factor = 0.1 ** (1/decay_steps)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = param_group['lr'] * decay_factor
+
+        if global_step % 1000 == 0:
+            psnr_res.append(np.mean(psnr_lst))
+            eps_time = time.time() - time0
+            eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
+            time_res.append(eps_time_str)
+
+        # Logging
+        if global_step % args.i_print == 0 or global_step == 1:
+            eps_time = time.time() - time0
+            eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
+            avg_forward_time = np.mean(forward_time_lst) if forward_time_lst else 0
+            iter_psnr = np.mean(psnr_lst)
+            tqdm.write(f'scene_rep_reconstruction ({stage}): iter {global_step:6d} / '
+                       f'Loss: {loss.item():.9f} / L1 Loss: {l1loss.item():.9f} / PSNR: {iter_psnr:5.2f} / '
+                       f'Forward: {avg_forward_time:.2f}ms / Eps: {eps_time_str}')
+            if wandbrun is not None:
+                wandbrun.log({
+                    "train_psnr": iter_psnr,
+                    "loss": loss.item(),
+                    "l1_loss": l1loss.item(),
+                    "forward_time_ms": avg_forward_time,
+                    "global_step": global_step,
+                }, step=global_step)
+            psnr_lst = []
+            forward_time_lst = []
+
+        # Train PSNR logging to wandb every 10000 iters
+        if global_step % 10000 == 0:
+            train_psnr_avg = np.mean(psnr_res) if psnr_res else psnr.item()
+            if wandbrun is not None:
+                wandbrun.log({
+                    "train_psnr": train_psnr_avg,
+                    "global_step": global_step,
+                })
+            print(f'[iter {global_step}] Train PSNR: {train_psnr_avg:.2f}')
+
+        # Test evaluation every 10000 iters
+        if (global_step % 10000 == 0 and stage != 'coarse'):
+            for frameid in model.dvgos.keys():
+                if int(frameid) in model.fixed_frame:
+                    continue
+              
+                testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{frameid}')
+                os.makedirs(testsavedir, exist_ok=True)
+
+                # 해당 프레임의 테스트 인덱스 찾기
+                frame_index = torch.nonzero(data_dict['frame_ids'] == int(frameid)).squeeze(1).cpu().numpy()
+                test_indices = np.intersect1d(data_dict['i_test'], frame_index).copy()
+
+                if len(test_indices) == 0:
+                    print(f'No test views for frame {frameid}')
+                    continue
+
+                rgbs, res_psnr, test_forward_time = render_viewpoints_lf(
+                    model=model.dvgos[frameid],
+                    xyuv_coords=xyuv_coords[test_indices].numpy(),
+                    HW=data_dict['HW'][test_indices],
+                    gt_imgs=[images[i].cpu().numpy() for i in test_indices],
+                    savedir=testsavedir, 
+                    dump_images=True,
+                    eval_ssim=args.eval_ssim, 
+                    eval_lpips_alex=args.eval_lpips_alex, 
+                    eval_lpips_vgg=args.eval_lpips_vgg,
+                    frame_id=frameid,
+                    shared_rgbnet=model.rgbnet,
+                )
+                print('iter:', global_step, 'test_psnr:', res_psnr, 'test_forward_time:', f'{test_forward_time:.2f}ms')
+
+                if wandbrun is not None:
+                    rgb_map = [wandb.Image(utils.to8b(i), caption=f"test rgb {frameid}") for i in rgbs]
+                    wandbrun.log({
+                        f"test_rgb_frame_{frameid}": rgb_map,
+                        f"test_psnr_frame_{frameid}": res_psnr,
+                        f"test_forward_time_frame_{frameid}": test_forward_time,
+                        "test_psnr": res_psnr,
+                        "test_forward_time": test_forward_time,
+                        "global_step": global_step,
+                    })
+
+    if global_step != -1:
+        model.save_checkpoints()
+
+
+def train_lf(args, cfg, data_dict):
+    """Light Field training entry point."""
+    print('train_lf: start')
+    eps_time = time.time()
+    os.makedirs(os.path.join(cfg.basedir, cfg.expname), exist_ok=True)
+    
+    with open(os.path.join(cfg.basedir, cfg.expname, 'args.txt'), 'w') as file:
+        for arg in sorted(vars(args)):
+            attr = getattr(args, arg)
+            file.write('{} = {}\n'.format(arg, attr))
+    cfg.dump(os.path.join(cfg.basedir, cfg.expname, 'config.py'))
+
+    # XYUV bounds from data
+    xyuv_min_fine = torch.tensor(data_dict['xyuv_min'])
+    xyuv_max_fine = torch.tensor(data_dict['xyuv_max'])
+    
+    if cfg.coarse_train.N_iters > 0:
+        print('train_lf: coarse reconstruction start')
+        scene_rep_reconstruction_lf(
+            args=args, cfg=cfg,
+            cfg_model=cfg.fine_model_and_render, cfg_train=cfg.coarse_train,
+            xyuv_min=xyuv_min_fine, xyuv_max=xyuv_max_fine,
+            data_dict=data_dict, stage='coarse'
+        )
+
+    scene_rep_reconstruction_lf(
+        args=args, cfg=cfg,
+        cfg_model=cfg.fine_model_and_render, cfg_train=cfg.fine_train,
+        xyuv_min=xyuv_min_fine, xyuv_max=xyuv_max_fine,
+        data_dict=data_dict, stage='fine'
+    )
+    
+    eps_fine = time.time() - eps_time
+    eps_time_str = f'{eps_fine//3600:02.0f}:{eps_fine//60%60:02.0f}:{eps_fine%60:02.0f}'
+    print('train_lf: fine detail reconstruction in', eps_time_str)
+
+
+# ================== Original NeRF functions (kept for compatibility) ==================
 
 @torch.no_grad()
 def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
@@ -170,7 +584,6 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
             imageio.imwrite(filename, rgb8)
 
             rgb8 = utils.to8b(1 - depths[i] / np.max(depths[i]))
-            #rgb8 = utils.to8b(1 - depths[i] / 5)
             filename = os.path.join(savedir, '{:03d}_depth.jpg'.format(i))
             if rgb8.shape[-1]<3:
                 rgb8 = np.repeat(rgb8, 3, axis=-1)
@@ -181,15 +594,6 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
     bgmaps = np.array(bgmaps)
 
     return rgbs, depths, bgmaps, res_psnr
-
-
-def seed_everything():
-    '''Seed everything for better reproducibility.
-    (some pytorch operation is non-deterministic like the backprop of grid_samples)
-    '''
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
 
 
 def load_everything(args, cfg):
@@ -214,775 +618,6 @@ def load_everything(args, cfg):
     return data_dict
 
 
-def _compute_bbox_by_cam_frustrm_bounded(cfg, HW, Ks, poses, i_train, near, far):
-    xyz_min = torch.Tensor([np.inf, np.inf, np.inf])
-    xyz_max = -xyz_min
-    for (H, W), K, c2w in zip(HW[i_train], Ks[i_train], poses[i_train]):
-        rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
-                H=H, W=W, K=K, c2w=c2w,
-                ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
-        if cfg.data.ndc:
-            pts_nf = torch.stack([rays_o+rays_d*near, rays_o+rays_d*far])
-        else:
-            pts_nf = torch.stack([rays_o+viewdirs*near, rays_o+viewdirs*far])
-        xyz_min = torch.minimum(xyz_min, pts_nf.amin((0,1,2)))
-        xyz_max = torch.maximum(xyz_max, pts_nf.amax((0,1,2)))
-    return xyz_min, xyz_max
-
-def _compute_bbox_by_cam_frustrm_unbounded(cfg, HW, Ks, poses, i_train, near_clip):
-    # Find a tightest cube that cover all camera centers
-    xyz_min = torch.Tensor([np.inf, np.inf, np.inf])
-    xyz_max = -xyz_min
-    for (H, W), K, c2w in zip(HW[i_train], Ks[i_train], poses[i_train]):
-        rays_o, rays_d, viewdirs = dvgo.get_rays_of_a_view(
-                H=H, W=W, K=K, c2w=c2w,
-                ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
-        pts = rays_o + rays_d * near_clip
-        xyz_min = torch.minimum(xyz_min, pts.amin((0,1)))
-        xyz_max = torch.maximum(xyz_max, pts.amax((0,1)))
-    center = (xyz_min + xyz_max) * 0.5
-    radius = (center - xyz_min).max() * cfg.data.unbounded_inner_r
-    xyz_min = center - radius
-    xyz_max = center + radius
-    return xyz_min, xyz_max
-
-def compute_bbox_by_cam_frustrm(args, cfg, HW, Ks, poses, i_train, near, far, **kwargs):
-    print('compute_bbox_by_cam_frustrm: start')
-    if cfg.data.unbounded_inward:
-        xyz_min, xyz_max = _compute_bbox_by_cam_frustrm_unbounded(
-                cfg, HW, Ks, poses, i_train, kwargs.get('near_clip', None))
-
-    else:
-        xyz_min, xyz_max = _compute_bbox_by_cam_frustrm_bounded(
-                cfg, HW, Ks, poses, i_train, near, far)
-    print('compute_bbox_by_cam_frustrm: xyz_min', xyz_min)
-    print('compute_bbox_by_cam_frustrm: xyz_max', xyz_max)
-    print('compute_bbox_by_cam_frustrm: finish')
-    return xyz_min, xyz_max
-
-@torch.no_grad()
-def compute_bbox_by_coarse_geo(model_class, model_path, thres):
-    print('compute_bbox_by_coarse_geo: start')
-    eps_time = time.time()
-    model = utils.load_model(model_class, model_path)
-    interp = torch.stack(torch.meshgrid(
-        torch.linspace(0, 1, model.world_size[0]),
-        torch.linspace(0, 1, model.world_size[1]),
-        torch.linspace(0, 1, model.world_size[2]),
-    ), -1)
-    dense_xyz = model.xyz_min * (1-interp) + model.xyz_max * interp
-    density = model.density(dense_xyz)
-    alpha = model.activate_density(density)
-    mask = (alpha > thres)
-    active_xyz = dense_xyz[mask]
-    xyz_min = active_xyz.amin(0)
-    xyz_max = active_xyz.amax(0)
-    print('compute_bbox_by_coarse_geo: xyz_min', xyz_min)
-    print('compute_bbox_by_coarse_geo: xyz_max', xyz_max)
-    eps_time = time.time() - eps_time
-    print('compute_bbox_by_coarse_geo: finish (eps time:', eps_time, 'secs)')
-    return xyz_min, xyz_max
-
-def create_new_model(cfg, cfg_model, cfg_train, xyz_min, xyz_max, stage, coarse_ckpt_path):
-    model_kwargs = copy.deepcopy(cfg_model)
-    num_voxels = model_kwargs.pop('num_voxels')
-    if len(cfg_train.pg_scale):
-        num_voxels = int(num_voxels / (2**len(cfg_train.pg_scale)))
-
-    if cfg.data.ndc:
-        print(f'scene_rep_reconstruction ({stage}): \033[96muse multiplane images\033[0m')
-        model = dmpigo.DirectMPIGO(
-            xyz_min=xyz_min, xyz_max=xyz_max,
-            num_voxels=num_voxels,
-            **model_kwargs)
-    elif cfg.data.unbounded_inward:
-        print(f'scene_rep_reconstruction ({stage}): \033[96muse contraced voxel grid (covering unbounded)\033[0m')
-        model = dcvgo.DirectContractedVoxGO(
-            xyz_min=xyz_min, xyz_max=xyz_max,
-            num_voxels=num_voxels,
-            **model_kwargs)
-    else:
-        print(f'scene_rep_reconstruction ({stage}): \033[96muse dense voxel grid\033[0m')
-        model = dvgo.DirectVoxGO(
-            xyz_min=xyz_min, xyz_max=xyz_max,
-            num_voxels=num_voxels,
-            mask_cache_path=coarse_ckpt_path,
-            **model_kwargs)
-    model = model.to(device)
-    optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
-    return model, optimizer
-
-
-def coarse_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, data_dict, stage, frameid, coarse_ckpt_path=None):
-    # init
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if abs(cfg_model.world_bound_scale - 1) > 1e-9:
-        xyz_shift = (xyz_max - xyz_min) * (cfg_model.world_bound_scale - 1) / 2
-        xyz_min -= xyz_shift
-        xyz_max += xyz_shift
-    HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, frame_ids = [
-        data_dict[k] for k in [
-            'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'frame_ids'
-        ]
-    ]
-
-   
-    frame_index = torch.nonzero(frame_ids ==frameid).squeeze(1).numpy()
-
-    i_train = np.intersect1d(i_train, frame_index).copy()
-    i_test = np.intersect1d(i_test, frame_index).copy()
-    i_val = np.intersect1d(i_val, frame_index).copy()
-
-    
-
-
-
-
-    last_ckpt_path = os.path.join(cfg.basedir, cfg.expname, f'{stage}_last_{frameid}.tar')
-    
-    if args.no_reload:
-        reload_ckpt_path = None
-    elif os.path.isfile(last_ckpt_path):
-        reload_ckpt_path = last_ckpt_path
-    else:
-        reload_ckpt_path = None
-
-    
-
-
-    # init model and optimizer
-    if reload_ckpt_path is None:
-
-        #ipdb.set_trace()
-        print(f'scene_rep_reconstruction ({stage}): train from scratch')
-        model, optimizer = create_new_model(cfg, cfg_model, cfg_train, xyz_min, xyz_max, stage, coarse_ckpt_path)
-        start = 0           
-        if cfg_model.maskout_near_cam_vox:
-            model.maskout_near_cam_vox(poses[i_train,:3,3], near)
-    else:
-        return
-
-    # init rendering setup
-    render_kwargs = {
-        'near': data_dict['near'],
-        'far': data_dict['far'],
-        'bg': 1 if cfg.data.white_bkgd else 0,
-        'rand_bkgd': cfg.data.rand_bkgd,
-        'stepsize': cfg_model.stepsize,
-        'inverse_y': cfg.data.inverse_y,
-        'flip_x': cfg.data.flip_x,
-        'flip_y': cfg.data.flip_y,
-    }
-
-    # init batch rays sampler
-    def gather_training_rays():
-        if data_dict['irregular_shape']:
-            rgb_tr_ori = [images[i].to('cpu' if cfg.data.load2gpu_on_the_fly else device) for i in i_train]
-        else:
-            rgb_tr_ori = images[i_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
-
-        if cfg_train.ray_sampler == 'in_maskcache':
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = dvgo.get_training_rays_in_maskcache_sampling(
-                    rgb_tr_ori=rgb_tr_ori,
-                    train_poses=poses[i_train],
-                    HW=HW[i_train], Ks=Ks[i_train],
-                    ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                    flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y,
-                    model=model, render_kwargs=render_kwargs)
-        elif cfg_train.ray_sampler == 'flatten':
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = dvgo.get_training_rays_flatten(
-                rgb_tr_ori=rgb_tr_ori,
-                train_poses=poses[i_train],
-                HW=HW[i_train], Ks=Ks[i_train], ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
-        else:
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = dvgo.get_training_rays(
-                rgb_tr=rgb_tr_ori,
-                train_poses=poses[i_train],
-                HW=HW[i_train], Ks=Ks[i_train], ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
-        index_generator = dvgo.batch_indices_generator(len(rgb_tr), cfg_train.N_rand)
-        batch_index_sampler = lambda: next(index_generator)
-        return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler
-
-    rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler = gather_training_rays()
-
-    # view-count-based learning rate
-    if cfg_train.pervoxel_lr:
-        def per_voxel_init():
-            cnt = model.voxel_count_views(
-                    rays_o_tr=rays_o_tr, rays_d_tr=rays_d_tr, imsz=imsz, near=near, far=far,
-                    stepsize=cfg_model.stepsize, downrate=cfg_train.pervoxel_lr_downrate,
-                    irregular_shape=data_dict['irregular_shape'])
-            optimizer.set_pervoxel_lr(cnt)
-            model.mask_cache.mask[cnt.squeeze() <= 2] = False
-        per_voxel_init()
-
-    if cfg_train.maskout_lt_nviews > 0:
-        model.update_occupancy_cache_lt_nviews(
-                rays_o_tr, rays_d_tr, imsz, render_kwargs, cfg_train.maskout_lt_nviews)
-
-    # GOGO
-    torch.cuda.empty_cache()
-    psnr_lst = []
-    time0 = time.time()
-    global_step = -1
-
-    psnr_res = []
-    time_res = []
-    psnr_test = []
-    for global_step in trange(1+start, 1+cfg_train.N_iters):
-
-        # renew occupancy grid
-        if model.mask_cache is not None and (global_step + 500) % 1000 == 0:
-            model.update_occupancy_cache()
-
-        # progress scaling checkpoint
-        if global_step in cfg_train.pg_scale:
-            n_rest_scales = len(cfg_train.pg_scale)-cfg_train.pg_scale.index(global_step)-1
-            cur_voxels = int(cfg_model.num_voxels / (2**n_rest_scales))
-            if isinstance(model, (dvgo.DirectVoxGO, dcvgo.DirectContractedVoxGO)):
-                model.scale_volume_grid(cur_voxels)
-            elif isinstance(model, dmpigo.DirectMPIGO):
-                model.scale_volume_grid(cur_voxels, model.mpi_depth)
-            else:
-                raise NotImplementedError
-            optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
-            model.act_shift -= cfg_train.decay_after_scale
-            torch.cuda.empty_cache()
-
-        # random sample rays
-        if cfg_train.ray_sampler in ['flatten', 'in_maskcache']:
-            sel_i = batch_index_sampler()
-            target = rgb_tr[sel_i]
-            rays_o = rays_o_tr[sel_i]
-            rays_d = rays_d_tr[sel_i]
-            viewdirs = viewdirs_tr[sel_i]
-        elif cfg_train.ray_sampler == 'random':
-            sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand],device = rgb_tr.device)
-            sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand],device = rgb_tr.device)
-            sel_c = torch.randint(rgb_tr.shape[2], [cfg_train.N_rand],device = rgb_tr.device)
-            target = rgb_tr[sel_b, sel_r, sel_c]
-            rays_o = rays_o_tr[sel_b, sel_r, sel_c]
-            rays_d = rays_d_tr[sel_b, sel_r, sel_c]
-            viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
-        else:
-            raise NotImplementedError
-
-        if cfg.data.load2gpu_on_the_fly:
-            target = target.to(device)
-            rays_o = rays_o.to(device)
-            rays_d = rays_d.to(device)
-            viewdirs = viewdirs.to(device)
-
-        # volume rendering
-        render_result = model(
-            rays_o, rays_d, viewdirs,
-            global_step=global_step, is_train=True, mode='feat' if stage=='fine' else 'point',
-            **render_kwargs)
-
-        # gradient descent step
-        optimizer.zero_grad(set_to_none=True)
-        loss = cfg_train.weight_main * F.mse_loss(render_result['rgb_marched'], target)
-        psnr = utils.mse2psnr(loss.detach())
-        if cfg_train.weight_entropy_last > 0:
-            pout = render_result['alphainv_last'].clamp(1e-6, 1-1e-6)
-            entropy_last_loss = -(pout*torch.log(pout) + (1-pout)*torch.log(1-pout)).mean()
-            loss += cfg_train.weight_entropy_last * entropy_last_loss
-        if cfg_train.weight_nearclip > 0:
-            near_thres = data_dict['near_clip'] / model.scene_radius[0].item()
-            near_mask = (render_result['t'] < near_thres)
-            density = render_result['raw_density'][near_mask]
-            if len(density):
-                nearclip_loss = (density - density.detach()).sum()
-                loss += cfg_train.weight_nearclip * nearclip_loss
-        if cfg_train.weight_distortion > 0:
-            n_max = render_result['n_max']
-            s = render_result['s']
-            w = render_result['weights']
-            ray_id = render_result['ray_id']
-            loss_distortion = flatten_eff_distloss(w, s, 1/n_max, ray_id)
-            loss += cfg_train.weight_distortion * loss_distortion
-        if cfg_train.weight_rgbper > 0:
-            rgbper = (render_result['raw_rgb'] - target[render_result['ray_id']]).pow(2).sum(-1)
-            rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
-            loss += cfg_train.weight_rgbper * rgbper_loss
-
-        loss.backward()
-
-        if global_step<cfg_train.tv_before and global_step>cfg_train.tv_after and global_step%cfg_train.tv_every==0:
-            if cfg_train.weight_tv_density>0:
-                model.density_total_variation_add_grad(
-                    cfg_train.weight_tv_density/len(rays_o), global_step<cfg_train.tv_dense_before)
-            if cfg_train.weight_tv_k0>0:
-                model.k0_total_variation_add_grad(
-                    cfg_train.weight_tv_k0/len(rays_o), global_step<cfg_train.tv_dense_before)
-
-        optimizer.step()
-        psnr_lst.append(psnr.item())
-
-        # update lr
-        decay_steps = cfg_train.lrate_decay * 1000
-        decay_factor = 0.1 ** (1/decay_steps)
-        for i_opt_g, param_group in enumerate(optimizer.param_groups):
-            param_group['lr'] = param_group['lr'] * decay_factor
-
-
-
-        # check log & save
-        if global_step%args.i_print==0:
-            eps_time = time.time() - time0
-            eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
-            tqdm.write(f'scene_rep_reconstruction ({stage}): iter {global_step:6d} / '
-                       f'Loss: {loss.item():.9f} / PSNR: {np.mean(psnr_lst):5.2f} / '
-                       f'Eps: {eps_time_str}')
-            psnr_lst = []        
-
-
-    if global_step != -1:
-        torch.save({
-            'global_step': global_step,
-            'model_kwargs': model.get_kwargs(),
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-        }, last_ckpt_path)
-        print(f'scene_rep_reconstruction ({stage}): saved checkpoints at', last_ckpt_path)
-
-        
-
-
-
-def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, data_dict, stage, frameid=0, coarse_ckpt_path=None):
-    # init
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if abs(cfg_model.world_bound_scale - 1) > 1e-9:
-        xyz_shift = (xyz_max - xyz_min) * (cfg_model.world_bound_scale - 1) / 2
-        xyz_min -= xyz_shift
-        xyz_max += xyz_shift
-    HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, frame_ids,masks = [
-        data_dict[k] for k in [
-            'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'frame_ids','masks'
-        ]
-    ]
-    residual_mode = False
-
-
-        
-
-    frame_ids = frame_ids.cpu()
-    unique_frame_ids = torch.unique(frame_ids, sorted=True).cpu().numpy().tolist()
-
-    model = dvgo_video.DirectVoxGO_Video(frameids=unique_frame_ids,xyz_min=xyz_min,xyz_max=xyz_max,cfg=cfg)
-
-    ret = model.load_checkpoints()
-
-
-    if not cfg.fine_model_and_render.dynamic_rgbnet and args.training_mode>0:
-        cfg.fine_train.lrate_rgbnet = 0
-    model.set_fixedframe(ret)
-
-
-    model = model.cuda()
-    
-    #create optimizer for model
-    optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
-
-   
-    # init rendering setup
-    render_kwargs = {
-        'near': data_dict['near'],
-        'far': data_dict['far'],
-        'bg': 1 if cfg.data.white_bkgd else 0,
-        'rand_bkgd': cfg.data.rand_bkgd,
-        'stepsize': cfg_model.stepsize,
-        'inverse_y': cfg.data.inverse_y,
-        'flip_x': cfg.data.flip_x,
-        'flip_y': cfg.data.flip_y,
-    }
-
-    # init batch rays sampler
-    def gather_training_rays(tmasks=None):
-
-        rgb_tr_s = []
-        rays_o_tr_s = []
-        rays_d_tr_s = []
-        viewdirs_tr_s = []
-        imsz_s = []
-        frame_id_s = []
-
-        for id in unique_frame_ids:
-            if id in model.fixed_frame:
-                continue
-            id_mask = (frame_ids==id)[i_train]
-            t_train = np.array(i_train)[id_mask]
-            rgb_tr_ori = images[t_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
-
-            pmasks = None
-            if tmasks is not None:
-                pmasks = torch.from_numpy(tmasks[t_train]).to('cpu' if cfg.data.load2gpu_on_the_fly else device)
-
-            if cfg_train.ray_sampler == 'in_maskcache':
-
-                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz,frame_ids_tr = dvgo.get_training_rays_multi_frame(
-                        rgb_tr_ori=rgb_tr_ori,
-                        train_poses=poses[t_train],
-                        HW=HW[t_train], Ks=Ks[t_train],
-                        ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                        flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y,
-                        frame_ids = frame_ids[t_train],
-                        model=model.dvgos[str(id)], masks = pmasks, render_kwargs=render_kwargs)
-            elif cfg_train.ray_sampler == 'flatten':
-
-                rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz,frame_ids_tr = dvgo.get_training_rays_multi_frame(
-                        rgb_tr_ori=rgb_tr_ori,
-                        train_poses=poses[t_train],
-                        HW=HW[t_train], Ks=Ks[t_train],
-                        ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
-                        flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y,
-                        frame_ids = frame_ids[t_train],
-                        model=model.dvgos[str(id)], masks = pmasks, render_kwargs=render_kwargs,
-                        flatten = True)
-            else:
-                raise NotImplementedError
-
-            rgb_tr_s += rgb_tr
-            rays_o_tr_s+=rays_o_tr
-            rays_d_tr_s+=rays_d_tr
-            viewdirs_tr_s+=viewdirs_tr
-            imsz_s+=imsz
-            frame_id_s += frame_ids_tr
-        
-        print(rgb_tr_s[0].size())
-        index_generator = dvgo.batch_indices_generator_MF(rgb_tr_s, cfg_train.N_rand)
-        batch_index_sampler = lambda: next(index_generator)
-        return rgb_tr_s, rays_o_tr_s, rays_d_tr_s, viewdirs_tr_s, imsz_s, frame_id_s, batch_index_sampler
-
-    rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, frame_id_tr, batch_index_sampler = gather_training_rays()
-
-    def my_collate_fn(batch):
-            # Separate the data and labels from each sample in the batch
-            assert len(batch) ==1
-            item = batch[0]
-            data1 = item[0] 
-            data2 = item[1] 
-            data3 = item[2] 
-            data4 = item[3] 
-            data5 = item[4]
-            data6 = item[5]
-
-            
-            # Return the collated data and labels as a single batch
-            return data1, data2, data3, data4, data5, data6
-
-
-    
-    ray_dataset = utils.Ray_Dataset(rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, frame_id_tr, batch_index_sampler)
-    ray_dataloader = DataLoader(ray_dataset, batch_size=1,num_workers = 1, shuffle=False, collate_fn = my_collate_fn)
-    raydata_iter = iter(ray_dataloader)
-    
-    # GOGO
-    torch.cuda.empty_cache()
-    psnr_lst = []
-    time0 = time.time()
-    global_step = -1
-
-    psnr_res = []
-    time_res = []
-    psnr_test = []
-    for global_step in trange(1, 1+cfg_train.N_iters):
-
-        # renew occupancy grid
-        if (global_step + 500) % 1000 == 0:
-            ret = model.update_occupancy_cache()
-        if  global_step in [ cfg_train.maskout_iter] and not cfg.data.ndc:
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, frame_id_tr, batch_index_sampler = gather_training_rays(tmasks = None)
-            ray_dataset = utils.Ray_Dataset(rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, frame_id_tr, batch_index_sampler)
-            ray_dataloader = DataLoader(ray_dataset, batch_size=1,num_workers = 6, shuffle=False, collate_fn = my_collate_fn)
-            raydata_iter = iter(ray_dataloader)
-
-        if  global_step in [ cfg_train.maskout_iter] and  cfg.data.ndc:
-            cfg.data.factor = 3
-            data_dict = load_everything(args=args, cfg=cfg)
-            HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, frame_ids,masks = [
-            data_dict[k] for k in [
-                    'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'frame_ids','masks'
-                ]
-            ]
-            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, frame_id_tr, batch_index_sampler = gather_training_rays(tmasks = None)
-            ray_dataset = utils.Ray_Dataset(rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, frame_id_tr, batch_index_sampler)
-            ray_dataloader = DataLoader(ray_dataset, batch_size=1,num_workers = 6, shuffle=False, collate_fn = my_collate_fn)
-            raydata_iter = iter(ray_dataloader)
-
-        if args.training_mode != -1:
-            # progress scaling checkpoint
-            if global_step in cfg_train.pg_scale:
-                n_rest_scales = len(cfg_train.pg_scale)-cfg_train.pg_scale.index(global_step)-1
-                cur_voxels = int(cfg_model.num_voxels / (2**n_rest_scales))
-                
-                model.scale_volume_grid(cur_voxels)
-            
-                optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
-                #对model.dvgos中的每个模型的act_shift修改
-                for frameid in model.dvgos.keys():
-                    if int(frameid) in model.fixed_frame:
-                        continue
-                    model.dvgos[frameid].act_shift -= cfg_train.decay_after_scale
-                torch.cuda.empty_cache()
-
-
-            if global_step in cfg_train.pg_scale2:
-                print('**Second Level PG****')
-                n_rest_scales = len(cfg_train.pg_scale2)-cfg_train.pg_scale2.index(global_step)-1
-                cur_voxels = int(cfg_model.num_voxels / (2**n_rest_scales))
-                
-                model.scale_volume_grid(cur_voxels)
-            
-                optimizer = utils.create_optimizer_or_freeze_model_dvgovideo(model, cfg_train, global_step=0)
-                #对model.dvgos中的每个模型的act_shift修改
-                for frameid in model.dvgos.keys():
-                    if int(frameid) in model.fixed_frame:
-                        continue
-                    model.dvgos[frameid].act_shift -= cfg_train.decay_after_scale/2.0
-                torch.cuda.empty_cache()
-
-
-            
-        
-        camera_id, sel_i = batch_index_sampler()
-        sel_i = torch.from_numpy(sel_i)
-        while sel_i.size(0) == 0:
-            print('while loop in Ray_dataset')
-            camera_id, sel_i = batch_index_sampler()
-        
-
-        
-        frameids = frame_id_tr[camera_id][sel_i]
-    
-        target = rgb_tr[camera_id][sel_i]   
-        rays_o = rays_o_tr[camera_id][sel_i]
-        rays_d = rays_d_tr[camera_id][sel_i]
-        viewdirs = viewdirs_tr[camera_id][sel_i]
-        
-        
-        #frameids, target, target, rays_o, rays_d, viewdirs = next(raydata_iter)
-       
-
-        if cfg.data.load2gpu_on_the_fly:
-            target = target.to(device)
-            rays_o = rays_o.to(device)
-            rays_d = rays_d.to(device)
-            viewdirs = viewdirs.to(device)
-
-        
-        # volume rendering
-        render_result = model(
-            rays_o, rays_d, viewdirs, frame_ids = frameids,
-            global_step=global_step,  mode='feat',
-            **render_kwargs)
-
-
-        # gradient descent step
-        optimizer.zero_grad(set_to_none=True)
-        loss = cfg_train.weight_main * F.mse_loss(render_result['rgb_marched'], target)
-        psnr = utils.mse2psnr(loss.detach())
-        if cfg_train.weight_entropy_last > 0:
-            pout = render_result['alphainv_last'].clamp(1e-6, 1-1e-6)
-            entropy_last_loss = -(pout*torch.log(pout) + (1-pout)*torch.log(1-pout)).mean()
-            loss += cfg_train.weight_entropy_last * entropy_last_loss
-        if cfg_train.weight_nearclip > 0:
-            near_thres = data_dict['near_clip'] / model.scene_radius[0].item()
-            near_mask = (render_result['t'] < near_thres)
-            density = render_result['raw_density'][near_mask]
-            if len(density):
-                nearclip_loss = (density - density.detach()).sum()
-                loss += cfg_train.weight_nearclip * nearclip_loss
-        if cfg_train.weight_distortion > 0:
-            n_max = render_result['n_max']
-            s = render_result['s']
-            w = render_result['weights']
-            ray_id = render_result['ray_id']
-            loss_distortion = flatten_eff_distloss(w, s, 1/n_max, ray_id)
-            loss += cfg_train.weight_distortion * loss_distortion
-        if  stage=='fine':
-            l1loss = model.compute_k0_l1_loss(frameids)
-            loss += cfg.fine_train.weight_l1_loss*l1loss
-        #if cfg_train.weight_rgbper > 0:
-        #    rgbper = (render_result['raw_rgb'] - target[render_result['ray_id']]).pow(2).sum(-1)
-        #    rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
-        #    loss += cfg_train.weight_rgbper * rgbper_loss
-        loss.backward()
-
-        
-        if global_step<cfg_train.tv_before and global_step>cfg_train.tv_after and global_step%cfg_train.tv_every==0:
-            if cfg_train.weight_tv_density>0:
-                model.density_total_variation_add_grad(
-                    cfg_train.weight_tv_density/len(rays_o), global_step<cfg_train.tv_dense_before, frameids)
-            if cfg_train.weight_tv_k0>0:
-                model.k0_total_variation_add_grad(
-                    cfg_train.weight_tv_k0/len(rays_o), global_step<cfg_train.tv_dense_before, frameids)
-        
-
-        optimizer.step()
-        psnr_lst.append(psnr.item())
-
-        # update lr
-        decay_steps = cfg_train.lrate_decay * 1000
-        decay_factor = 0.1 ** (1/decay_steps)
-        for i_opt_g, param_group in enumerate(optimizer.param_groups):
-            param_group['lr'] = param_group['lr'] * decay_factor
-
-
-        if global_step%1000==0:
-            psnr_res.append(np.mean(psnr_lst))
-            eps_time = time.time() - time0
-            eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
-            time_res.append(eps_time_str)
-
-        # check log & save
-        if global_step%args.i_print==0 or global_step==1:
-            eps_time = time.time() - time0
-            eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
-            tqdm.write(f'scene_rep_reconstruction ({stage}): iter {global_step:6d} / '
-                       f'Loss: {loss.item():.9f} / PSNR: {np.mean(psnr_lst):5.2f} / '
-                       f'Eps: {eps_time_str}')
-            psnr_lst = []
-
-
-
-        if (global_step%(cfg_train.N_iters-1)==0 and stage!='coarse') :
-        #if global_step%4000==0 and stage!='coarse':
-
-            for frameid in model.dvgos.keys():
-                if int(frameid) in model.fixed_frame:
-                    continue
-              
-                render_viewpoints_kwargs = {
-                    'model': model.dvgos[frameid],
-                    'ndc': cfg.data.ndc,
-                    'render_kwargs': {
-                        'near': data_dict['near'],
-                        'far': data_dict['far'],
-                        'bg': 1 if cfg.data.white_bkgd else 0,
-                        'stepsize': cfg.fine_model_and_render.stepsize,
-                        'inverse_y': cfg.data.inverse_y,
-                        'flip_x': cfg.data.flip_x,
-                        'flip_y': cfg.data.flip_y,
-                        'render_depth': True,
-                        'shared_rgbnet':model.rgbnet,
-                    },
-                }
-                testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{frameid}')
-                os.makedirs(testsavedir, exist_ok=True)
-
-                #找出data_dict['i_test']中属于frameid的索引 TODO
-                frame_index = torch.nonzero(data_dict['frame_ids'] ==int(frameid)).squeeze(1).numpy()
-
-                i_test = np.intersect1d(data_dict['i_test'], frame_index).copy()
-
-
-                rgbs, depths, bgmaps,res_psnr = render_viewpoints(
-                        render_poses=data_dict['poses'][i_test],
-                        HW=data_dict['HW'][i_test],
-                        Ks=data_dict['Ks'][i_test],
-                        gt_imgs=[data_dict['images'][i].cpu().numpy() for i in i_test],
-                        savedir=testsavedir, dump_images=True,
-                        eval_ssim=args.eval_ssim, eval_lpips_alex=args.eval_lpips_alex, eval_lpips_vgg=args.eval_lpips_vgg,
-                        **render_viewpoints_kwargs)
-                print('iter:',global_step,'test_psnr:',res_psnr)
-
-
-                depths_map = [wandb.Image(utils.to8b(1 - i / np.max(i)), caption=f"test depth {frameid}")  for i in depths]
-                rgb_map = [wandb.Image(utils.to8b(i), caption=f"test rgb {frameid}") for i in rgbs]
-                wandbrun.log({"test_rgb": rgb_map,
-                           "test_depth": depths_map,
-                           "test psnr": res_psnr,
-                        })
-                #psnr_test.append(res_psnr)
-
-        
-
-
-    if global_step != -1:
-        model.save_checkpoints()
-        
-
-        
-      
-        
-
-    #print(psnr_res)
-    #print(time_res)
-    '''
-    df = pd.DataFrame({"psnr": psnr_res, "time": time_res})
-    df.to_csv('./log/result_%s.csv' % cfg.expname,index=False)
-
-    df = pd.DataFrame({'test_psnr':psnr_test})
-    df.to_csv('./log/result_%s_test.csv' % cfg.expname,index=False)
-    '''
-
-
-def train(args, cfg, data_dict):
-
-    # init
-    print('train: start')
-    eps_time = time.time()
-    os.makedirs(os.path.join(cfg.basedir, cfg.expname), exist_ok=True)
-    with open(os.path.join(cfg.basedir, cfg.expname, 'args.txt'), 'w') as file:
-        for arg in sorted(vars(args)):
-            attr = getattr(args, arg)
-            file.write('{} = {}\n'.format(arg, attr))
-    cfg.dump(os.path.join(cfg.basedir, cfg.expname, 'config.py'))
-
-    # coarse geometry searching (only works for inward bounded scenes)
-
-    eps_coarse = time.time()
-    xyz_min_coarse, xyz_max_coarse = compute_bbox_by_cam_frustrm(args=args, cfg=cfg, **data_dict)
-    if cfg.coarse_train.N_iters > 0:
-        for frameid in cfg.data.frame_ids:
-            coarse_reconstruction(
-                    args=args, cfg=cfg,
-                    cfg_model=cfg.coarse_model_and_render, cfg_train=cfg.coarse_train,
-                    xyz_min=xyz_min_coarse, xyz_max=xyz_max_coarse, frameid = frameid,
-                    data_dict=data_dict, stage='coarse')
-        eps_coarse = time.time() - eps_coarse
-        eps_time_str = f'{eps_coarse//3600:02.0f}:{eps_coarse//60%60:02.0f}:{eps_coarse%60:02.0f}'
-        print('train: coarse geometry searching in', eps_time_str)
-        coarse_ckpt_path = None
-    else:
-        print('train: skip coarse geometry searching')
-        coarse_ckpt_path = None
-
-    # fine detail reconstruction
-    eps_fine = time.time()
-    
-    '''
-    if cfg.coarse_train.N_iters == 0:
-        xyz_min_fine, xyz_max_fine = xyz_min_coarse.clone(), xyz_max_coarse.clone()
-    else:
-        xyz_min_fine, xyz_max_fine = compute_bbox_by_coarse_geo(
-                model_class=dvgo.DirectVoxGO, model_path=coarse_ckpt_path,
-                thres=cfg.fine_model_and_render.bbox_thres)
-    '''
-    
-    xyz_min_fine =  torch.tensor(cfg.data.xyz_min)
-    xyz_max_fine = torch.tensor(cfg.data.xyz_max)
-    scene_rep_reconstruction(
-            args=args, cfg=cfg,
-            cfg_model=cfg.fine_model_and_render, cfg_train=cfg.fine_train,
-            xyz_min=xyz_min_fine, xyz_max=xyz_max_fine,
-            data_dict=data_dict, stage='fine',
-            coarse_ckpt_path=coarse_ckpt_path)
-    eps_fine = time.time() - eps_fine
-    eps_time_str = f'{eps_fine//3600:02.0f}:{eps_fine//60%60:02.0f}:{eps_fine%60:02.0f}'
-    print('train: fine detail reconstruction in', eps_time_str)
-
-    eps_time = time.time() - eps_time
-    eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
-    print('train: finish (eps time', eps_time_str, ')')
-
-
 if __name__=='__main__':
 
     # load setup
@@ -991,38 +626,32 @@ if __name__=='__main__':
     cfg = Config.fromfile(args.config)
     cfg.data.frame_ids = args.frame_ids
 
-
     print("################################")
     print("--- Frame_ID:", cfg.data.frame_ids)
     print("--- training_mode:", args.training_mode)
+    print("--- dataset_type:", cfg.data.dataset_type)
     print("################################")
 
-    if args.training_mode>0 and cfg.data.ndc:
-
-        cfg.fine_train.lrate_rgbnet /=5.0
+    if args.training_mode > 0 and cfg.data.ndc:
+        cfg.fine_train.lrate_rgbnet /= 5.0
         cfg.fine_train.weight_tv_density = 0
         cfg.fine_train.weight_tv_k0 = 0
 
- 
-        
-
-    #wandb
+    # wandb
+    wandb_dir = "/data/ysj/result/tetrirf"
+    os.makedirs(wandb_dir, exist_ok=True)
     wandbrun = wandb.init(
-            # set the wandb project where this run will be logged
-            project="TeTriRF",
-        
-            # track hyperparameters and run metadata
-            config={
+        project="TeTriRF",
+        dir=wandb_dir,
+        config={
             "configs": cfg,
             "args": args,
-            },
-            resume = "allow",
-            id = cfg.expname,
-        )
+        },
+        resume="allow",
+        id=cfg.expname,
+    )
 
-
-
-    # init enviroment
+    # init environment
     if torch.cuda.is_available():
         torch.set_default_tensor_type('torch.cuda.FloatTensor')
         device = torch.device('cuda')
@@ -1030,15 +659,20 @@ if __name__=='__main__':
         device = torch.device('cpu')
     seed_everything()
 
-    # load images / poses / camera settings / data split
-    data_dict = load_everything(args=args, cfg=cfg)
-
-    
-    # train
-    if not args.render_only:
-        train(args, cfg, data_dict)
-
- 
+    # Check dataset type and load accordingly
+    if cfg.data.dataset_type == 'LF':
+        # Light Field mode
+        data_dict = load_everything_lf(args=args, cfg=cfg)
+        
+        if not args.render_only:
+            train_lf(args, cfg, data_dict)
+    else:
+        # Original NeRF mode
+        data_dict = load_everything(args=args, cfg=cfg)
+        
+        if not args.render_only:
+            # Original train function would go here
+            # For now, raise error since we're focusing on LF
+            raise NotImplementedError("Original NeRF training not fully implemented in this version")
 
     print('Done')
-
