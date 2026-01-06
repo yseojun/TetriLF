@@ -48,6 +48,8 @@ def config_parser():
     # training mode
     parser.add_argument("--training_mode", type=int, default=0)
     parser.add_argument('--frame_ids', nargs='+', type=int, help='a list of ID')
+    parser.add_argument("--no_share_grid", action='store_true',
+                        help='do not use shared grid across frames')
 
 
     # testing options
@@ -198,11 +200,13 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
     unique_frame_ids = torch.unique(frame_ids, sorted=True).cpu().numpy().tolist()
 
     # Create model
+    no_share_grid = args.no_share_grid or cfg.fine_model_and_render.get('no_share_grid', False)
     model = dvgo_video.DirectVoxGO_Video(
         frameids=unique_frame_ids,
         xyuv_min=xyuv_min,
         xyuv_max=xyuv_max,
-        cfg=cfg
+        cfg=cfg,
+        no_share_grid=no_share_grid
     )
 
     ret = model.load_checkpoints()
@@ -469,7 +473,8 @@ def train_lf(args, cfg, data_dict):
     xyuv_min_fine = torch.tensor(data_dict['xyuv_min'])
     xyuv_max_fine = torch.tensor(data_dict['xyuv_max'])
     
-    if cfg.coarse_train.N_iters > 0:
+    no_share_grid = args.no_share_grid or cfg.fine_model_and_render.get('no_share_grid', False)
+    if cfg.coarse_train.N_iters > 0 and not no_share_grid:
         print('train_lf: coarse reconstruction start')
         scene_rep_reconstruction_lf(
             args=args, cfg=cfg,

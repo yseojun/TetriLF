@@ -39,6 +39,7 @@ fine_model_and_render = dict(
     dynamic_rgbnet=True,
     viewbase_pe=4,
     stepsize=0.5,
+    no_share_grid=False,
 )
 
 fine_train = dict(

@@ -7,11 +7,11 @@ import json
 # =============================================================================
 DATASET_FRAMES = {
     # ambushfight: 20 frames
-    'ambushfight_1': 20,
-    'ambushfight_2': 20,
-    'ambushfight_3': 20,
-    'ambushfight_4': 20,
-    'ambushfight_5': 20,
+    # 'ambushfight_1': 20,
+    # 'ambushfight_2': 20,
+    # 'ambushfight_3': 20,
+    # 'ambushfight_4': 20,
+    # 'ambushfight_5': 20,
     'ambushfight_6': 20,
     # bamboo: 50 frames
     'bamboo_1': 50,
