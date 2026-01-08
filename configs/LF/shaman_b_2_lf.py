@@ -1,8 +1,8 @@
 _base_ = '../default.py'
 
 # These will be overwritten by gen_train_all.py
-expname = 'lf_shaman_b_2_0106_4_128_half_2'
-basedir = '/data/ysj/result/tetrirf/logs/0106_4_128_half_2'
+expname = 'lf_shaman_b_2_0108_4_64_half'
+basedir = '/data/ysj/result/tetrirf/logs/0108_4_64_half'
 
 data = dict(
     datadir='/data/ysj/dataset/LF_video_half/shaman_b_2',
@@ -35,7 +35,7 @@ fine_model_and_render = dict(
     rgbnet_dim=96,
     RGB_model='MLP',
     rgbnet_depth=4,
-    rgbnet_width=128,
+    rgbnet_width=64,
     dynamic_rgbnet=True,
     viewbase_pe=4,
     stepsize=0.5,

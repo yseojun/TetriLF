@@ -31,6 +31,7 @@ class PlaneGrid(nn.Module):
         self.register_buffer('xyuv_max', torch.Tensor(xyuv_max))
         
         # 4D world_size: [X, Y, U, V]
+        # world_size는 config에서 지정한 최종 크기 그대로 사용
         if len(world_size) == 4:
             X, Y, U, V = world_size
         else:
@@ -38,10 +39,6 @@ class PlaneGrid(nn.Module):
             X, Y, U = world_size
             V = U
         
-        X = X * self.scale
-        Y = Y * self.scale
-        U = U * self.scale
-        V = V * self.scale
         self.world_size = torch.tensor([X, Y, U, V])
         
         # 6 planes for 4D light field
@@ -128,11 +125,6 @@ class PlaneGrid(nn.Module):
         else:
             X, Y, U = new_world_size
             V = U
-            
-        X = X * self.scale
-        Y = Y * self.scale
-        U = U * self.scale
-        V = V * self.scale
         
         self.world_size = torch.tensor([X, Y, U, V])
         
@@ -155,11 +147,6 @@ class PlaneGrid(nn.Module):
         else:
             X, Y, U = new_world_size
             V = U
-            
-        X = X * self.scale
-        Y = Y * self.scale
-        U = U * self.scale
-        V = V * self.scale
     
         xy_plane = nn.Parameter(F.interpolate(self.xy_plane.data, size=[X, Y], mode='bilinear', align_corners=True), requires_grad=False)
         uv_plane = nn.Parameter(F.interpolate(self.uv_plane.data, size=[U, V], mode='bilinear', align_corners=True), requires_grad=False)

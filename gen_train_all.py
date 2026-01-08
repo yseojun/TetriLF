@@ -51,9 +51,9 @@ DATASETS = list(DATASET_FRAMES.keys())  # 전체 학습시 사용
 # 공통 설정
 # =============================================================================
 DATA_ROOT = '/data/ysj/dataset/LF_video_half'
-LOG_ROOT = '/data/ysj/result/tetrirf/logs/0106_4_128_half_2'
+LOG_ROOT = '/data/ysj/result/tetrirf/logs/0108_4_64_half'
 TEMPLATE_CONFIG = 'configs/LF/template_lf.py'
-EXP_SUFFIX = '0106_4_128_half_2'
+EXP_SUFFIX = '0108_4_64_half'
 
 # 학습 설정
 STEP = 10

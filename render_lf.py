@@ -345,6 +345,10 @@ if __name__ == '__main__':
     logdir = os.path.join(cfg.basedir, cfg.expname)
     
     # Process each frame
+    all_psnrs = []
+    all_ssims = []
+    all_lpips = []
+
     for frame_id in args.frame_ids:
         print(f"\n=== Processing Frame {frame_id} ===")
         
@@ -450,14 +454,19 @@ if __name__ == '__main__':
                 if len(res_psnr) > 0:
                     rgb_map = [wandb.Image(utils.to8b(i), caption=f"render test rgb {frame_id}") for i in rgbs]
                     
+                    psnr_val = res_psnr.get('psnr', 0)
+                    all_psnrs.append(psnr_val)
+                    
                     log_dict = {
-                        'psnr': res_psnr.get('psnr', 0),
+                        'psnr': psnr_val,
                         'frame_id': frame_id,
                     }
                     if 'ssim' in res_psnr:
                         log_dict['ssim'] = res_psnr['ssim']
+                        all_ssims.append(res_psnr['ssim'])
                     if 'lpips' in res_psnr:
                         log_dict['lpips(vgg)'] = res_psnr['lpips']
+                        all_lpips.append(res_psnr['lpips'])
                     
                     if frame_id % 10 == 0:
                         log_dict['render_rgb'] = rgb_map
@@ -467,6 +476,27 @@ if __name__ == '__main__':
         # Clean up
         del model, rgbnet
         torch.cuda.empty_cache()
+
+    # Final summary logging
+    if len(all_psnrs) > 0:
+        avg_psnr = np.mean(all_psnrs)
+        print(f"\n{'='*30}")
+        print(f"Final Average PSNR: {avg_psnr:.4f}")
+        
+        final_log = {'test_psnr': avg_psnr}
+        
+        if len(all_ssims) > 0:
+            avg_ssim = np.mean(all_ssims)
+            print(f"Final Average SSIM: {avg_ssim:.4f}")
+            final_log['test_ssim'] = avg_ssim
+            
+        if len(all_lpips) > 0:
+            avg_lpips = np.mean(all_lpips)
+            print(f"Final Average LPIPS: {avg_lpips:.4f}")
+            final_log['test_lpips'] = avg_lpips
+            
+        print(f"{'='*30}\n")
+        wandbrun.log(final_log)
 
     print('\nDone')
 
