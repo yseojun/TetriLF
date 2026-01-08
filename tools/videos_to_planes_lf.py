@@ -191,6 +191,22 @@ if __name__ == '__main__':
         
         success = True
         
+        # Update model_kwargs world_size based on restored plane sizes
+        # This is critical because Progressive Growing may have changed the world_size during training
+        if 'model_kwargs' in frame_ckpt and 'world_size' in frame_ckpt['model_kwargs']:
+            # Get world_size from plane_sizes metadata
+            # xy_plane shape: [1, R, X, Y] -> world_size[0], world_size[1]
+            # uv_plane shape: [1, R, U, V] -> world_size[2], world_size[3]
+            xy_size = plane_sizes.get('xy_plane', [1, 16, 12, 12])
+            uv_size = plane_sizes.get('uv_plane', [1, 16, 240, 120])
+            
+            new_world_size = [xy_size[2], xy_size[3], uv_size[2], uv_size[3]]
+            old_world_size = frame_ckpt['model_kwargs']['world_size']
+            
+            if old_world_size != new_world_size:
+                tqdm.write(f"  Updating model_kwargs world_size: {old_world_size} -> {new_world_size}")
+                frame_ckpt['model_kwargs']['world_size'] = new_world_size
+        
         # Restore feature planes
         timer.start('plane_restore')
         for p in LF_PLANE_NAMES:

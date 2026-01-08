@@ -6,34 +6,33 @@ import json
 # 데이터셋별 프레임 수 (여기서 수정)
 # =============================================================================
 DATASET_FRAMES = {
-    # ambushfight: 20 frames
     'ambushfight_1': 20,
-    'ambushfight_2': 20,
-    'ambushfight_3': 20,
-    'ambushfight_4': 20,
-    'ambushfight_5': 20,
+    'ambushfight_2': 21,
+    'ambushfight_3': 41,
+    'ambushfight_4': 30,
+    'ambushfight_5': 50,
     'ambushfight_6': 20,
-    # bamboo: 50 frames
+    
     'bamboo_1': 50,
     'bamboo_2': 50,
     'bamboo_3': 50,
-    # chickenrun: 50 frames
+    
     'chickenrun_1': 50,
-    'chickenrun_2': 50,
+    'chickenrun_2': 21,
     'chickenrun_3': 50,
-    # foggyrocks: 50 frames
+    
     'foggyrocks_1': 50,
     'foggyrocks_2': 50,
-    # questbegins: 40 frames
+    
     'questbegins_1': 40,
-    # shaman: 50 frames
+    
     'shaman_1': 50,
     'shaman_2': 50,
     'shaman_3': 50,
-    # shaman_b: 48 frames
+    
     'shaman_b_1': 48,
-    'shaman_b_2': 48,
-    # thebigfight: 50 frames
+    'shaman_b_2': 50,
+    
     'thebigfight_1': 50,
     'thebigfight_2': 50,
     'thebigfight_3': 50,
@@ -51,9 +50,9 @@ DATASETS = list(DATASET_FRAMES.keys())  # 전체 학습시 사용
 # 공통 설정
 # =============================================================================
 DATA_ROOT = '/data/ysj/dataset/LF_video_half'
-LOG_ROOT = '/data/ysj/result/tetrirf/logs/0108_4_64_half'
+LOG_ROOT = '/data/ysj/result/tetrirf/logs/0103_4_128'
 TEMPLATE_CONFIG = 'configs/LF/template_lf.py'
-EXP_SUFFIX = '0108_4_64_half'
+EXP_SUFFIX = '0103_4_128'
 
 # 학습 설정
 STEP = 10

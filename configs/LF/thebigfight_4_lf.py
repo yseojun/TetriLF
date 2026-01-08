@@ -1,8 +1,8 @@
 _base_ = '../default.py'
 
 # These will be overwritten by gen_train_all.py
-expname = 'lf_thebigfight_4_0108_4_64_half'
-basedir = '/data/ysj/result/tetrirf/logs/0108_4_64_half'
+expname = 'lf_thebigfight_4_0103_4_128'
+basedir = '/data/ysj/result/tetrirf/logs/0103_4_128'
 
 data = dict(
     datadir='/data/ysj/dataset/LF_video_half/thebigfight_4',
@@ -19,7 +19,7 @@ data = dict(
     # x=2,4,6 and y=2,4,6 (3x3 grid of test views)
     # view_idx = y * grid_size_x + x = y * 9 + x
     test_frames=[20, 22, 24, 38, 40, 42, 56, 58, 60],  # (y,x): (2,2),(2,4),(2,6),(4,2),(4,4),(4,6),(6,2),(6,4),(6,6)
-    world_size=[3, 3, 60, 30],
+    world_size=[12, 12, 240, 120],
     
     # Not used for LF but needed for compatibility
     inverse_y=False,

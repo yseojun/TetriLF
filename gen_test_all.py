@@ -13,34 +13,33 @@ import argparse
 # 데이터셋별 프레임 수 (gen_train_all.py에서 복사)
 # =============================================================================
 DATASET_FRAMES = {
-    # ambushfight: 20 frames
     'ambushfight_1': 20,
-    'ambushfight_2': 20,
-    'ambushfight_3': 20,
-    'ambushfight_4': 20,
-    'ambushfight_5': 20,
+    'ambushfight_2': 21,
+    'ambushfight_3': 41,
+    'ambushfight_4': 30,
+    'ambushfight_5': 50,
     'ambushfight_6': 20,
-    # bamboo: 50 frames
+    
     'bamboo_1': 50,
     'bamboo_2': 50,
     'bamboo_3': 50,
-    # chickenrun: 50 frames
+    
     'chickenrun_1': 50,
-    'chickenrun_2': 50,
+    'chickenrun_2': 21,
     'chickenrun_3': 50,
-    # foggyrocks: 50 frames
+    
     'foggyrocks_1': 50,
     'foggyrocks_2': 50,
-    # questbegins: 40 frames
+    
     'questbegins_1': 40,
-    # shaman: 50 frames
+    
     'shaman_1': 50,
     'shaman_2': 50,
     'shaman_3': 50,
-    # shaman_b: 48 frames
+    
     'shaman_b_1': 48,
-    'shaman_b_2': 48,
-    # thebigfight: 50 frames
+    'shaman_b_2': 50,
+    
     'thebigfight_1': 50,
     'thebigfight_2': 50,
     'thebigfight_3': 50,
@@ -55,15 +54,20 @@ DATASETS = list(DATASET_FRAMES.keys())  # 전체 테스트시 사용
 # DATASETS = ['ambushfight_1', 'bamboo_1']
 
 # =============================================================================
-# 공통 설정
+# 공통 설정 (gen_train_all.py와 동일하게 설정)
 # =============================================================================
-CONFIG_DIR = 'configs/LF'
+
+EXP_SUFFIX = '0103_4_128'
+
+LOG_ROOT = '/data/ysj/result/tetrirf/logs/' + EXP_SUFFIX
 
 
 def generate_test_commands(dataset_name, step, reald=False, qp=None, codec='h265'):
     """렌더링 테스트 명령어 생성"""
     total_frames = DATASET_FRAMES[dataset_name]
-    config_file = f'{CONFIG_DIR}/{dataset_name}_lf.py'
+    # 해당 데이터셋의 학습 결과 폴더에 있는 config.py 사용
+    expname = f'lf_{dataset_name}_{EXP_SUFFIX}'
+    config_file = f'{LOG_ROOT}/{expname}/config.py'
     commands = []
     
     for i in range(0, total_frames, step):
@@ -100,7 +104,7 @@ def main():
     parser.add_argument('--codec', type=str, default='h265',
                         choices=['h265', 'mpg2'],
                         help='Codec used for compression (ignored if --reald)')
-    parser.add_argument('--step', type=int, default=20,
+    parser.add_argument('--step', type=int, default=10,
                         help='Number of frames to render per batch')
     parser.add_argument('--datasets', nargs='+', type=str, default=None,
                         help='Specific datasets to test (default: all)')
