@@ -327,48 +327,65 @@ class DirectVoxGO_Video(torch.nn.Module):
         self.dvgos[frameid_str].k0_total_variation_add_grad(weight, dense_mode)
 
     def compute_k0_l1_loss(self, frameids):
-        """인접 프레임 간 plane L1 loss 계산"""
+        """인접 프레임 간 plane/grid L1 loss 계산"""
         frame_ids_unique = torch.unique(frameids, sorted=True).cpu().int().numpy().tolist()   
         assert len(frame_ids_unique) == 1
         loss = 0
         N = 0
         frameid = frame_ids_unique[0]
+        is_4d = self.cfg.fine_model_and_render.k0_type == '4D'
         
         if str(frameid-1) in self.dvgos:
             frameid2 = str(frameid-1)
             cur_k0 = self.dvgos[str(frameid)].k0
             prev_k0 = self.dvgos[frameid2].k0
             
-            if cur_k0.xy_plane.size() != prev_k0.xy_plane.size():
-                planes = prev_k0.scale_volume_grid_value(self.dvgos[str(frameid)].world_size)
-                loss += F.l1_loss(cur_k0.xy_plane, planes[0])
-                loss += F.l1_loss(cur_k0.uv_plane, planes[1])
-                loss += F.l1_loss(cur_k0.xu_plane, planes[2])
-                loss += F.l1_loss(cur_k0.xv_plane, planes[3])
-                loss += F.l1_loss(cur_k0.yu_plane, planes[4])
-                loss += F.l1_loss(cur_k0.yv_plane, planes[5])
-                N += 6
+            if is_4d:
+                # Grid4D mode
+                if cur_k0.xyuv_grid.size() != prev_k0.xyuv_grid.size():
+                    grids = prev_k0.scale_volume_grid_value(self.dvgos[str(frameid)].world_size)
+                    loss += F.l1_loss(cur_k0.xyuv_grid, grids[0])
+                else:
+                    loss += F.l1_loss(cur_k0.xyuv_grid, prev_k0.xyuv_grid)
+                N += 1
             else:
-                loss += F.l1_loss(cur_k0.xy_plane, prev_k0.xy_plane)
-                loss += F.l1_loss(cur_k0.uv_plane, prev_k0.uv_plane)
-                loss += F.l1_loss(cur_k0.xu_plane, prev_k0.xu_plane)
-                loss += F.l1_loss(cur_k0.xv_plane, prev_k0.xv_plane)
-                loss += F.l1_loss(cur_k0.yu_plane, prev_k0.yu_plane)
-                loss += F.l1_loss(cur_k0.yv_plane, prev_k0.yv_plane)
-                N += 6
+                # PlaneGrid mode
+                if cur_k0.xy_plane.size() != prev_k0.xy_plane.size():
+                    planes = prev_k0.scale_volume_grid_value(self.dvgos[str(frameid)].world_size)
+                    loss += F.l1_loss(cur_k0.xy_plane, planes[0])
+                    loss += F.l1_loss(cur_k0.uv_plane, planes[1])
+                    loss += F.l1_loss(cur_k0.xu_plane, planes[2])
+                    loss += F.l1_loss(cur_k0.xv_plane, planes[3])
+                    loss += F.l1_loss(cur_k0.yu_plane, planes[4])
+                    loss += F.l1_loss(cur_k0.yv_plane, planes[5])
+                    N += 6
+                else:
+                    loss += F.l1_loss(cur_k0.xy_plane, prev_k0.xy_plane)
+                    loss += F.l1_loss(cur_k0.uv_plane, prev_k0.uv_plane)
+                    loss += F.l1_loss(cur_k0.xu_plane, prev_k0.xu_plane)
+                    loss += F.l1_loss(cur_k0.xv_plane, prev_k0.xv_plane)
+                    loss += F.l1_loss(cur_k0.yu_plane, prev_k0.yu_plane)
+                    loss += F.l1_loss(cur_k0.yv_plane, prev_k0.yv_plane)
+                    N += 6
                 
         if str(frameid+1) in self.dvgos:
             frameid2 = str(frameid+1)
             cur_k0 = self.dvgos[str(frameid)].k0
             next_k0 = self.dvgos[frameid2].k0
             
-            loss += F.l1_loss(cur_k0.xy_plane, next_k0.xy_plane)
-            loss += F.l1_loss(cur_k0.uv_plane, next_k0.uv_plane)
-            loss += F.l1_loss(cur_k0.xu_plane, next_k0.xu_plane)
-            loss += F.l1_loss(cur_k0.xv_plane, next_k0.xv_plane)
-            loss += F.l1_loss(cur_k0.yu_plane, next_k0.yu_plane)
-            loss += F.l1_loss(cur_k0.yv_plane, next_k0.yv_plane)
-            N += 6
+            if is_4d:
+                # Grid4D mode
+                loss += F.l1_loss(cur_k0.xyuv_grid, next_k0.xyuv_grid)
+                N += 1
+            else:
+                # PlaneGrid mode
+                loss += F.l1_loss(cur_k0.xy_plane, next_k0.xy_plane)
+                loss += F.l1_loss(cur_k0.uv_plane, next_k0.uv_plane)
+                loss += F.l1_loss(cur_k0.xu_plane, next_k0.xu_plane)
+                loss += F.l1_loss(cur_k0.xv_plane, next_k0.xv_plane)
+                loss += F.l1_loss(cur_k0.yu_plane, next_k0.yu_plane)
+                loss += F.l1_loss(cur_k0.yv_plane, next_k0.yv_plane)
+                N += 6
             
         if N == 0:
             return loss

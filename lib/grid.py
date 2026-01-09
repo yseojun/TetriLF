@@ -298,7 +298,7 @@ class Grid4D(nn.Module):
 
     def scale_volume_grid_value(self, new_world_size):
         if self.channels == 0:
-            return
+            return (None,)
         if len(new_world_size) == 4:
             X, Y, U, V = new_world_size
         else:
@@ -308,7 +308,8 @@ class Grid4D(nn.Module):
         # 4D interpolate using custom CUDA kernel
         xyuv_grid = nn.Parameter(interpolate_4d(self.xyuv_grid.data, size=[X, Y, U, V], align_corners=True), requires_grad=False)
 
-        return xyuv_grid
+        # Return as tuple for consistency with PlaneGrid
+        return (xyuv_grid,)
 
     def total_variation_add_grad(self, wx, wy, wu, wv, dense_mode):
         '''Add gradients by total variation loss in-place'''
