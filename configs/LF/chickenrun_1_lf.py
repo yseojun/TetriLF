@@ -1,8 +1,8 @@
 _base_ = '../default.py'
 
 # These will be overwritten by gen_train_all.py
-expname = 'lf_chickenrun_1_0109_4dtest'
-basedir = '/data/ysj/result/tetrirf/logs/0109_4dtest'
+expname = 'lf_chickenrun_1_0109_4dtest_2'
+basedir = '/data/ysj/result/tetrirf/logs/0109_4dtest_2'
 
 data = dict(
     datadir='/data/ysj/dataset/LF_video_half/chickenrun_1',

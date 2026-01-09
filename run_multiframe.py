@@ -633,18 +633,27 @@ if __name__=='__main__':
         cfg.fine_train.weight_tv_density = 0
         cfg.fine_train.weight_tv_k0 = 0
 
-    # wandb
+    # wandb - frame_ids를 포함하여 각 학습 세션마다 고유한 run 생성
     wandb_dir = "/data/ysj/result/tetrirf"
     os.makedirs(wandb_dir, exist_ok=True)
+    
+    # frame_ids 정보를 run ID에 포함 (예: lf_bamboo_1_0109_4dtest_2_f0-9)
+    frame_range = f"f{args.frame_ids[0]}-{args.frame_ids[-1]}" if args.frame_ids else "fNone"
+    wandb_run_id = f"{cfg.expname}_{frame_range}"
+    
     wandbrun = wandb.init(
         project="TeTriRF",
         dir=wandb_dir,
+        name=wandb_run_id,  # 표시되는 이름
         config={
             "configs": cfg,
             "args": args,
+            "frame_ids": args.frame_ids,
+            "frame_range": frame_range,
         },
         resume="allow",
-        id=cfg.expname,
+        id=wandb_run_id,  # 고유한 run ID
+        group=cfg.expname,
     )
 
     # init environment

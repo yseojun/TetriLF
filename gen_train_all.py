@@ -49,10 +49,11 @@ DATASETS = list(DATASET_FRAMES.keys())  # 전체 학습시 사용
 # =============================================================================
 # 공통 설정
 # =============================================================================
+EXP_SUFFIX = '0109_4dtest_3'
+
 DATA_ROOT = '/data/ysj/dataset/LF_video_half'
-LOG_ROOT = '/data/ysj/result/tetrirf/logs/0109_4dtest'
 TEMPLATE_CONFIG = 'configs/LF/template_lf.py'
-EXP_SUFFIX = '0109_4dtest'
+LOG_ROOT = '/data/ysj/result/tetrirf/logs' + EXP_SUFFIX
 
 # 학습 설정
 STEP = 10

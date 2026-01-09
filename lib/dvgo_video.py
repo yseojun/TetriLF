@@ -277,14 +277,18 @@ class DirectVoxGO_Video(torch.nn.Module):
             for fid in self.frameids:
                 if fid in self.fixed_frame:
                     continue
-                device = self.dvgos[str(fid)].k0.xy_plane.device
                 if self.cfg.fine_train.initialize_feature:
-                    self.dvgos[str(fid)].k0.xy_plane = nn.Parameter(planes[0].clone()).to(device)
-                    self.dvgos[str(fid)].k0.uv_plane = nn.Parameter(planes[1].clone()).to(device)
-                    self.dvgos[str(fid)].k0.xu_plane = nn.Parameter(planes[2].clone()).to(device)
-                    self.dvgos[str(fid)].k0.xv_plane = nn.Parameter(planes[3].clone()).to(device)
-                    self.dvgos[str(fid)].k0.yu_plane = nn.Parameter(planes[4].clone()).to(device)
-                    self.dvgos[str(fid)].k0.yv_plane = nn.Parameter(planes[5].clone()).to(device)
+                    if self.cfg.fine_model_and_render.k0_type == '4D':
+                        device = self.dvgos[str(fid)].k0.xyuv_grid.device
+                        self.dvgos[str(fid)].k0.xyuv_grid = nn.Parameter(planes[0].clone()).to(device)
+                    else:
+                        device = self.dvgos[str(fid)].k0.xy_plane.device
+                        self.dvgos[str(fid)].k0.xy_plane = nn.Parameter(planes[0].clone()).to(device)
+                        self.dvgos[str(fid)].k0.uv_plane = nn.Parameter(planes[1].clone()).to(device)
+                        self.dvgos[str(fid)].k0.xu_plane = nn.Parameter(planes[2].clone()).to(device)
+                        self.dvgos[str(fid)].k0.xv_plane = nn.Parameter(planes[3].clone()).to(device)
+                        self.dvgos[str(fid)].k0.yu_plane = nn.Parameter(planes[4].clone()).to(device)
+                        self.dvgos[str(fid)].k0.yv_plane = nn.Parameter(planes[5].clone()).to(device)
 
                 print(f'Initialize frame:{fid}')
 
