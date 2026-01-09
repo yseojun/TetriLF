@@ -1,8 +1,8 @@
 _base_ = '../default.py'
 
 # These will be overwritten by gen_train_all.py
-expname = 'lf_shaman_b_2_0103_4_128'
-basedir = '/data/ysj/result/tetrirf/logs/0103_4_128'
+expname = 'lf_shaman_b_2_0109_4dtest'
+basedir = '/data/ysj/result/tetrirf/logs/0109_4dtest'
 
 data = dict(
     datadir='/data/ysj/dataset/LF_video_half/shaman_b_2',
@@ -19,7 +19,7 @@ data = dict(
     # x=2,4,6 and y=2,4,6 (3x3 grid of test views)
     # view_idx = y * grid_size_x + x = y * 9 + x
     test_frames=[20, 22, 24, 38, 40, 42, 56, 58, 60],  # (y,x): (2,2),(2,4),(2,6),(4,2),(4,4),(4,6),(6,2),(6,4),(6,6)
-    world_size=[12, 12, 240, 120],
+    world_size=[4, 4, 240, 120],
     
     # Not used for LF but needed for compatibility
     inverse_y=False,
@@ -30,7 +30,7 @@ data = dict(
 fine_model_and_render = dict(
     num_voxels=120**4,
     num_voxels_base=120**4,
-    k0_type='PlaneGrid',
+    k0_type='4D',
     k0_config=dict(factor=4),
     rgbnet_dim=96,
     RGB_model='MLP',

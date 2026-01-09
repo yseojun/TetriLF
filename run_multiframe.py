@@ -343,9 +343,9 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
         psnr = utils.mse2psnr(loss.detach())
             
         l1loss = torch.tensor(0.0)
-        if stage == 'fine':
-            l1loss = model.compute_k0_l1_loss(frameids)
-            loss += cfg.fine_train.weight_l1_loss * l1loss
+        # if stage == 'fine':
+        #     l1loss = model.compute_k0_l1_loss(frameids)
+        #     loss += cfg.fine_train.weight_l1_loss * l1loss
 
         loss.backward()
         optimizer.step()
@@ -396,6 +396,9 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
 
         # Test evaluation every 10000 iters
         if (global_step % 10000 == 0):
+            all_test_psnrs = []
+            all_test_forward_times = []
+            
             for frameid in model.dvgos.keys():
                 if int(frameid) in model.fixed_frame:
                     continue
@@ -425,6 +428,11 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
                     shared_rgbnet=model.rgbnet,
                 )
                 print('iter:', global_step, 'test_psnr:', res_psnr, 'test_forward_time:', f'{test_forward_time:.2f}ms')
+                
+                # 평균 계산을 위해 수집
+                if res_psnr is not None:
+                    all_test_psnrs.append(res_psnr)
+                all_test_forward_times.append(test_forward_time)
 
                 if wandbrun is not None:
                     rgb_map = [wandb.Image(utils.to8b(i), caption=f"test rgb {frameid}") for i in rgbs]
@@ -432,10 +440,19 @@ def scene_rep_reconstruction_lf(args, cfg, cfg_model, cfg_train, xyuv_min, xyuv_
                         f"test_rgb_frame_{frameid}": rgb_map,
                         f"test_psnr_frame_{frameid}": res_psnr,
                         f"test_forward_time_frame_{frameid}": test_forward_time,
-                        "test_psnr": res_psnr,
-                        "test_forward_time": test_forward_time,
                         "global_step": global_step,
                     })
+            
+            # 전체 프레임 평균 로깅
+            if len(all_test_psnrs) > 0 and wandbrun is not None:
+                avg_test_psnr = np.mean(all_test_psnrs)
+                avg_test_forward_time = np.mean(all_test_forward_times)
+                print(f'[iter {global_step}] Average test PSNR: {avg_test_psnr:.2f}, Forward time: {avg_test_forward_time:.2f}ms')
+                wandbrun.log({
+                    "test_psnr_avg": avg_test_psnr,
+                    "test_forward_time_avg": avg_test_forward_time,
+                    "global_step": global_step,
+                })
 
     if global_step != -1:
         model.save_checkpoints()

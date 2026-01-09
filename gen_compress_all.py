@@ -15,8 +15,8 @@ import re
 # =============================================================================
 DATASET_FRAMES = {
     'ambushfight_1': 20,
-    'ambushfight_2': 21,
-    'ambushfight_3': 41,
+    'ambushfight_2': 20,
+    'ambushfight_3': 40,
     'ambushfight_4': 30,
     'ambushfight_5': 50,
     'ambushfight_6': 20,
@@ -26,7 +26,7 @@ DATASET_FRAMES = {
     'bamboo_3': 50,
     
     'chickenrun_1': 50,
-    'chickenrun_2': 21,
+    'chickenrun_2': 20,
     'chickenrun_3': 50,
     
     'foggyrocks_1': 50,

@@ -14,8 +14,8 @@ import argparse
 # =============================================================================
 DATASET_FRAMES = {
     'ambushfight_1': 20,
-    'ambushfight_2': 21,
-    'ambushfight_3': 41,
+    'ambushfight_2': 20,
+    'ambushfight_3': 40,
     'ambushfight_4': 30,
     'ambushfight_5': 50,
     'ambushfight_6': 20,
@@ -25,7 +25,7 @@ DATASET_FRAMES = {
     'bamboo_3': 50,
     
     'chickenrun_1': 50,
-    'chickenrun_2': 21,
+    'chickenrun_2': 20,
     'chickenrun_3': 50,
     
     'foggyrocks_1': 50,
@@ -57,7 +57,7 @@ DATASETS = list(DATASET_FRAMES.keys())  # 전체 테스트시 사용
 # 공통 설정 (gen_train_all.py와 동일하게 설정)
 # =============================================================================
 
-EXP_SUFFIX = '0103_4_128'
+EXP_SUFFIX = '0108_4_128_10step'
 
 LOG_ROOT = '/data/ysj/result/tetrirf/logs/' + EXP_SUFFIX
 
