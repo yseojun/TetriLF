@@ -315,13 +315,14 @@ if __name__ == '__main__':
 
     # Initialize wandb
     wandbrun = wandb.init(
-        project="TeTriRF_LF",
+        project="TeTriRF",
         config={
             "configs": cfg,
             "args": args,
         },
         resume="allow",
-        id='TestingLF_' + cfg.expname + f'_{args.qp}_{args.codec}',
+        id='Testing_' + cfg.expname + f'_{args.qp}_{args.codec}',
+        group=cfg.expname + '_' + str(args.reald),
     )
 
     # Set default model configs
