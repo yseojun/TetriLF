@@ -5,6 +5,8 @@ This script compresses Light Field feature planes (6 planes: xy, uv, xu, xv, yu,
 into video format for efficient storage and transmission.
 
 Unlike NeRF-based compression, Light Field doesn't have density grids.
+
+This version combines all 6 planes into a single image for single-video compression.
 """
 
 import os, sys, copy, glob, json, time, random, argparse
@@ -108,6 +110,75 @@ def tile_maker(feat_plane, h=2160, w=3840):
     return image
 
 
+def combine_plane_tiles(plane_tiles, layout=(3, 2), tile_h=2160, tile_w=3840):
+    """
+    Combine multiple plane tile images into a single large image.
+    
+    Args:
+        plane_tiles: dict of plane_name -> tile tensor (shape [h, w])
+        layout: (rows, cols) layout for combining tiles
+        tile_h, tile_w: size of each tile
+    
+    Returns:
+        combined: tensor of shape [rows * tile_h, cols * tile_w]
+        tile_positions: dict mapping plane_name to (row, col) position
+    """
+    rows, cols = layout
+    combined = torch.zeros(rows * tile_h, cols * tile_w)
+    
+    # Define tile positions (3x2 layout):
+    # Row 0: xy, uv
+    # Row 1: xu, xv
+    # Row 2: yu, yv
+    tile_order = ['xy', 'uv', 'xu', 'xv', 'yu', 'yv']
+    tile_positions = {}
+    
+    for idx, plane_name in enumerate(tile_order):
+        row = idx // cols
+        col = idx % cols
+        tile_positions[plane_name] = (row, col)
+        
+        if plane_name in plane_tiles:
+            tile = plane_tiles[plane_name]
+            r_start = row * tile_h
+            r_end = r_start + tile_h
+            c_start = col * tile_w
+            c_end = c_start + tile_w
+            combined[r_start:r_end, c_start:c_end] = tile
+    
+    return combined, tile_positions
+
+
+def split_combined_image(combined, layout=(3, 2), tile_h=2160, tile_w=3840):
+    """
+    Split a combined image back into individual plane tiles.
+    
+    Args:
+        combined: tensor of shape [rows * tile_h, cols * tile_w]
+        layout: (rows, cols) layout of the combined image
+        tile_h, tile_w: size of each tile
+    
+    Returns:
+        plane_tiles: dict of plane_name -> tile tensor (shape [tile_h, tile_w])
+    """
+    rows, cols = layout
+    tile_order = ['xy', 'uv', 'xu', 'xv', 'yu', 'yv']
+    plane_tiles = {}
+    
+    for idx, plane_name in enumerate(tile_order):
+        row = idx // cols
+        col = idx % cols
+        
+        r_start = row * tile_h
+        r_end = r_start + tile_h
+        c_start = col * tile_w
+        c_end = c_start + tile_w
+        
+        plane_tiles[plane_name] = combined[r_start:r_end, c_start:c_end].clone()
+    
+    return plane_tiles
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -141,10 +212,15 @@ if __name__ == '__main__':
         args.logdir = args.logdir[:-1]
     name = args.logdir.split('/')[-1]
 
-    # 16비트 PNG 이미지 저장 폴더 (인코딩 전 원본)
-    frames_dir = os.path.join(args.logdir, f'frames_{args.qp}')
+    # Tile layout: 3 rows x 2 cols
+    TILE_LAYOUT = (3, 2)
+    TILE_H = 2160
+    TILE_W = 3840
+
+    # 16비트 PNG 이미지 저장 폴더 (인코딩 전 원본) - 단일 이미지용
+    frames_dir = os.path.join(args.logdir, f'frames_1plane_{args.qp}')
     # 압축된 비디오 저장 폴더
-    compressed_dir = os.path.join(args.logdir, f'compressed_{args.qp}')
+    compressed_dir = os.path.join(args.logdir, f'compressed_1plane_{args.qp}')
 
     # Light Field plane names (6 planes)
     LF_PLANE_NAMES = ['xy', 'uv', 'xu', 'xv', 'yu', 'yv']
@@ -152,7 +228,7 @@ if __name__ == '__main__':
     for frameid in tqdm(range(0, args.numframe)):
         
         # Check if already processed
-        if os.path.isfile(os.path.join(frames_dir, f'xy_planes_frame_{frameid+1}.png')):
+        if os.path.isfile(os.path.join(frames_dir, f'combined_frame_{frameid+1}.png')):
             continue
 
         tmp_file = os.path.join(args.logdir, f'fine_last_{frameid}.tar')
@@ -179,9 +255,10 @@ if __name__ == '__main__':
         if len(planes) != 6:
             tqdm.write(f"Warning: Expected 6 planes, got {len(planes)}")
         
-        plane_data = []
+        plane_data = {}
         ratios = []
         tpsnr = []
+        plane_sizes = {}
         
         for p in LF_PLANE_NAMES:
             plane_key = f"{p}_plane"
@@ -192,6 +269,7 @@ if __name__ == '__main__':
                 
             raw_plane = planes[plane_key]
             plane_size = list(raw_plane.size())
+            plane_sizes[plane_key] = plane_size
             
             # Debug: feature plane value range
             tqdm.write(f"  {plane_key}: shape={plane_size}, min={raw_plane.min().item():.4f}, max={raw_plane.max().item():.4f}, mean={raw_plane.mean().item():.4f}")
@@ -215,7 +293,7 @@ if __name__ == '__main__':
             # Debug: normalized value range
             tqdm.write(f"  {plane_key} normalized: min={feat.min().item():.4f}, max={feat.max().item():.4f}, mean={feat.mean().item():.4f}")
             
-            plane_data.append(feat)
+            plane_data[p] = feat
             
             # Calculate PSNR
             gt_feat = (raw_plane - low_bound) / (high_bound - low_bound)
@@ -227,43 +305,55 @@ if __name__ == '__main__':
         # Create visualization directory if needed
         vis_dir = None
         if args.save_vis or args.save_channels:
-            vis_dir = os.path.join(args.logdir, f'visualization_{args.qp}')
+            vis_dir = os.path.join(args.logdir, f'visualization_1plane_{args.qp}')
             os.makedirs(vis_dir, exist_ok=True)
 
-        # Save planes as tiled images
-        imgs = {}
-        plane_sizes = {}
-        for plane_name, plane in zip(LF_PLANE_NAMES, plane_data):
-            img = tile_maker(plane)
-            imgs[f'{plane_name}_plane'] = img
-            plane_sizes[f'{plane_name}_plane'] = list(plane.size())
+        # Create individual tile images for each plane
+        plane_tiles = {}
+        for plane_name, plane in plane_data.items():
+            tile = tile_maker(plane, TILE_H, TILE_W)
+            plane_tiles[plane_name] = tile
             
-            cv2.imwrite(os.path.join(frames_dir, f'{plane_name}_planes_frame_{frameid+1}.png'), to16b(img.cpu().numpy()))
-            
-            # Save visualization images
+            # Save visualization images if requested
             if args.save_vis or args.save_channels:
                 save_feature_visualization(plane, plane_name, frameid, vis_dir, save_channels=args.save_channels)
 
-        # Save metadata
-        torch.save({
-            'plane_size': plane_sizes,
-            'bounds': (low_bound, high_bound),
-            'nbits': nbits,
-            'qp': args.qp,
-            'plane_names': LF_PLANE_NAMES,
-        }, os.path.join(frames_dir, f'planes_frame_meta.nf'))
+        # Combine all plane tiles into a single image
+        combined_img, tile_positions = combine_plane_tiles(plane_tiles, TILE_LAYOUT, TILE_H, TILE_W)
+        
+        # Save combined image as 16-bit PNG
+        cv2.imwrite(os.path.join(frames_dir, f'combined_frame_{frameid+1}.png'), to16b(combined_img.cpu().numpy()))
+        
+        # Save visualization of combined image if requested
+        if args.save_vis:
+            cv2.imwrite(os.path.join(vis_dir, f'combined_frame_{frameid+1}_8bit.png'), to8b(combined_img.cpu().numpy()))
+            cv2.imwrite(os.path.join(vis_dir, f'combined_frame_{frameid+1}_color.png'), apply_colormap(combined_img.cpu().numpy()))
+
+        # Save metadata (only once)
+        if frameid == 0 or not os.path.isfile(os.path.join(frames_dir, f'planes_frame_meta.nf')):
+            torch.save({
+                'plane_size': plane_sizes,
+                'bounds': (low_bound, high_bound),
+                'nbits': nbits,
+                'qp': args.qp,
+                'plane_names': LF_PLANE_NAMES,
+                'tile_layout': TILE_LAYOUT,
+                'tile_h': TILE_H,
+                'tile_w': TILE_W,
+                'tile_positions': tile_positions,
+                'combined_mode': True,  # Flag to indicate single-video mode
+            }, os.path.join(frames_dir, f'planes_frame_meta.nf'))
 
     # Generate video compression script
     os.makedirs(compressed_dir, exist_ok=True)
     
     filename = '/dev/shm/planes_to_videos_lf.sh'
     with open(filename, 'w') as f:
-        # Compress each plane to video
-        for p in LF_PLANE_NAMES:
-            if args.codec == 'h265':
-                f.write(f"ffmpeg -y -framerate 30 -i {frames_dir}/{p}_planes_frame_%d.png -c:v libx265 -pix_fmt gray12le -color_range pc -crf {args.qp} {compressed_dir}/{p}_planes.mp4\n")
-            elif args.codec == 'mpg2':
-                f.write(f"ffmpeg -y -framerate 30 -i {frames_dir}/{p}_planes_frame_%d.png -c:v mpeg2video -color_range pc -qscale:v {args.qp} {compressed_dir}/{p}_planes.mpg\n")
+        # Compress combined frames to single video
+        if args.codec == 'h265':
+            f.write(f"ffmpeg -y -framerate 30 -i {frames_dir}/combined_frame_%d.png -c:v libx265 -pix_fmt gray12le -color_range pc -crf {args.qp} {compressed_dir}/combined_planes.mp4\n")
+        elif args.codec == 'mpg2':
+            f.write(f"ffmpeg -y -framerate 30 -i {frames_dir}/combined_frame_%d.png -c:v mpeg2video -color_range pc -qscale:v {args.qp} {compressed_dir}/combined_planes.mpg\n")
         
         # Copy metadata and network files
         f.write(f'cp {frames_dir}/planes_frame_meta.nf {compressed_dir}/\n')
@@ -272,12 +362,13 @@ if __name__ == '__main__':
         
         # Create compressed archive
         f.write(f'cd {args.logdir}\n')
-        f.write(f'zip -r compressed.zip compressed_{args.qp}\n')
+        f.write(f'zip -r compressed_1plane.zip compressed_1plane_{args.qp}\n')
 
     os.system(f"bash {filename}")
     
     print(f"\n=== 완료 ===")
     print(f"프레임 이미지 (16-bit PNG): {frames_dir}")
     print(f"압축 비디오: {compressed_dir}")
+    print(f"압축 방식: 단일 비디오 (6개 plane을 {TILE_LAYOUT[0]}x{TILE_LAYOUT[1]} 레이아웃으로 조합)")
+    print(f"결합 이미지 크기: {TILE_LAYOUT[0] * TILE_H} x {TILE_LAYOUT[1] * TILE_W}")
     print(f"압축된 plane: {', '.join(LF_PLANE_NAMES)}")
-

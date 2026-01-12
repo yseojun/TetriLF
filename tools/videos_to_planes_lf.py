@@ -5,6 +5,8 @@ This script decompresses Light Field feature planes (6 planes: xy, uv, xu, xv, y
 from video format back to checkpoint format.
 
 Unlike NeRF-based decompression, Light Field doesn't have density grids.
+
+This version handles single-video compression (6 planes combined into one image).
 """
 
 import os, sys, copy, glob, json, time, random, argparse
@@ -94,6 +96,36 @@ def untile_image(image, h, w, ndim):
     return features
 
 
+def split_combined_image(combined, layout=(3, 2), tile_h=2160, tile_w=3840):
+    """
+    Split a combined image back into individual plane tiles.
+    
+    Args:
+        combined: tensor of shape [rows * tile_h, cols * tile_w]
+        layout: (rows, cols) layout of the combined image
+        tile_h, tile_w: size of each tile
+    
+    Returns:
+        plane_tiles: dict of plane_name -> tile tensor (shape [tile_h, tile_w])
+    """
+    rows, cols = layout
+    tile_order = ['xy', 'uv', 'xu', 'xv', 'yu', 'yv']
+    plane_tiles = {}
+    
+    for idx, plane_name in enumerate(tile_order):
+        row = idx // cols
+        col = idx % cols
+        
+        r_start = row * tile_h
+        r_end = r_start + tile_h
+        c_start = col * tile_w
+        c_end = c_start + tile_w
+        
+        plane_tiles[plane_name] = combined[r_start:r_end, c_start:c_end].clone()
+    
+    return plane_tiles
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -114,8 +146,8 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # Output directory for restored checkpoints
-    outdir = os.path.join(args.dir, '..', 'raw_out')
+    # Output directory for restored checkpoints - 변경: raw_out_2
+    outdir = os.path.join(args.dir, '..', 'raw_out_2')
     os.makedirs(outdir, exist_ok=True)
 
     # Load template checkpoint for structure
@@ -144,11 +176,20 @@ if __name__ == '__main__':
     # Get plane names (default to LF planes if not in meta)
     LF_PLANE_NAMES = meta.get('plane_names', ['xy', 'uv', 'xu', 'xv', 'yu', 'yv'])
     
+    # Get combined mode settings
+    combined_mode = meta.get('combined_mode', True)
+    tile_layout = meta.get('tile_layout', (3, 2))
+    tile_h = meta.get('tile_h', 2160)
+    tile_w = meta.get('tile_w', 3840)
+    
     print(f"Metadata loaded:")
     print(f"  Bounds: [{low_bound}, {high_bound}]")
     print(f"  QP: {qp}")
     print(f"  Planes: {LF_PLANE_NAMES}")
     print(f"  Plane sizes: {plane_sizes}")
+    print(f"  Combined mode: {combined_mode}")
+    print(f"  Tile layout: {tile_layout}")
+    print(f"  Tile size: {tile_h} x {tile_w}")
 
     name = args.dir.split('/')[-2]
     wandbrun = None
@@ -156,23 +197,23 @@ if __name__ == '__main__':
         wandbrun = wandb.init(
             project="TeTriRF_LF",
             resume="allow",
-            id='compressionLF_' + name + '_' + args.codec,
+            id='compressionLF_1plane_' + name + '_' + args.codec,
         )
 
     # Initialize timer
     timer = Timer()
 
-    # Decode videos to PNG frames using ffmpeg
+    # Decode video to PNG frames using ffmpeg
     filename = '/dev/shm/videos_to_planes_lf.sh'
     with open(filename, 'w') as f:
         f.write(f'cd {args.dir}\n')
-        for p in LF_PLANE_NAMES:
-            if args.codec == 'mpg2':
-                f.write(f"ffmpeg -y -i {p}_planes.mpg -pix_fmt gray16be {p}_planes_frame_%d_out.png\n")
-            else:
-                f.write(f"ffmpeg -y -i {p}_planes.mp4 -pix_fmt gray16be {p}_planes_frame_%d_out.png\n")
+        # Single combined video
+        if args.codec == 'mpg2':
+            f.write(f"ffmpeg -y -i combined_planes.mpg -pix_fmt gray16be combined_frame_%d_out.png\n")
+        else:
+            f.write(f"ffmpeg -y -i combined_planes.mp4 -pix_fmt gray16be combined_frame_%d_out.png\n")
     
-    print("Decoding videos to frames...")
+    print("Decoding video to frames...")
     timer.start('video_decoding')
     os.system(f"bash {filename}")
     t_decode = timer.stop('video_decoding')
@@ -207,19 +248,41 @@ if __name__ == '__main__':
                 tqdm.write(f"  Updating model_kwargs world_size: {old_world_size} -> {new_world_size}")
                 frame_ckpt['model_kwargs']['world_size'] = new_world_size
         
+        # Read combined image
+        timer.start('image_read')
+        img_path = os.path.join(args.dir, f"combined_frame_{frameid+1}_out.png")
+        
+        combined_img = cv2.imread(img_path, -1)
+        
+        if combined_img is None:
+            tqdm.write(f"Warning: Could not read {img_path}, skipping frame {frameid}")
+            success = False
+            timer.stop('image_read')
+            timer.stop('frame_reconstruction')
+            continue
+        
+        t_read = timer.stop('image_read')
+        
+        # Convert to tensor and normalize
+        timer.start('plane_split')
+        combined_tensor = torch.tensor(combined_img.astype(np.float32)) / int(2**16 - 1)
+        
+        # Split combined image into plane tiles
+        plane_tiles = split_combined_image(combined_tensor, tile_layout, tile_h, tile_w)
+        t_split = timer.stop('plane_split')
+        
         # Restore feature planes
         timer.start('plane_restore')
         for p in LF_PLANE_NAMES:
             key = f'{p}_plane'
-            img_path = os.path.join(args.dir, f"{p}_planes_frame_{frameid+1}_out.png")
             
-            quant_img = cv2.imread(img_path, -1)
-            
-            if quant_img is None:
-                tqdm.write(f"Warning: Could not read {img_path}, skipping frame {frameid}")
+            if p not in plane_tiles:
+                tqdm.write(f"Warning: {p} tile not found in combined image")
                 success = False
                 break
-
+            
+            tile = plane_tiles[p]
+            
             # Get plane size from metadata
             if key not in plane_sizes:
                 tqdm.write(f"Warning: {key} not in plane_sizes metadata")
@@ -231,7 +294,7 @@ if __name__ == '__main__':
             
             # Untile image to get feature plane
             plane = untile_image(
-                torch.tensor(quant_img.astype(np.float32)) / int(2**16 - 1), 
+                tile, 
                 plane_size[2],  # height
                 plane_size[3],  # width
                 plane_size[1]   # num channels (R)
@@ -254,6 +317,7 @@ if __name__ == '__main__':
         t_plane = timer.stop('plane_restore')
 
         if not success:
+            timer.stop('frame_reconstruction')
             continue
 
         # Save restored checkpoint
@@ -263,7 +327,7 @@ if __name__ == '__main__':
         t_save = timer.stop('checkpoint_save')
         
         t_frame = timer.stop('frame_reconstruction')
-        tqdm.write(f"Saved restored model: {output_path} (plane: {t_plane*1000:.1f}ms, save: {t_save*1000:.1f}ms, total: {t_frame*1000:.1f}ms)")
+        tqdm.write(f"Saved restored model: {output_path} (read: {t_read*1000:.1f}ms, split: {t_split*1000:.1f}ms, plane: {t_plane*1000:.1f}ms, save: {t_save*1000:.1f}ms, total: {t_frame*1000:.1f}ms)")
     
     t_total_recon = timer.stop('total_reconstruction')
 
@@ -284,7 +348,7 @@ if __name__ == '__main__':
     # Timing Summary
     # ========================================
     print("\n" + "=" * 70)
-    print("  TIMING SUMMARY")
+    print("  TIMING SUMMARY (Single-Video Combined Mode)")
     print("=" * 70)
     print(f"  {'Stage':<35} {'Total (s)':>12} {'Avg/Frame (ms)':>18}")
     print("-" * 70)
@@ -294,10 +358,20 @@ if __name__ == '__main__':
     t_decode_per_frame = t_decode_total / args.numframe * 1000 if args.numframe > 0 else 0
     print(f"  {'Video Decoding (ffmpeg)':<35} {t_decode_total:>12.4f} {t_decode_per_frame:>18.2f}")
     
+    # Image reading
+    t_read_total = timer.get_total('image_read')
+    t_read_avg = timer.get_avg('image_read') * 1000
+    print(f"  {'Image Reading (PNG)':<35} {t_read_total:>12.4f} {t_read_avg:>18.2f}")
+    
+    # Plane splitting
+    t_split_total = timer.get_total('plane_split')
+    t_split_avg = timer.get_avg('plane_split') * 1000
+    print(f"  {'Combined Image Split':<35} {t_split_total:>12.4f} {t_split_avg:>18.2f}")
+    
     # Plane restoration
     t_plane_total = timer.get_total('plane_restore')
     t_plane_avg = timer.get_avg('plane_restore') * 1000
-    print(f"  {'Plane Restoration (PNG->Tensor)':<35} {t_plane_total:>12.4f} {t_plane_avg:>18.2f}")
+    print(f"  {'Plane Restoration (Untile)':<35} {t_plane_total:>12.4f} {t_plane_avg:>18.2f}")
     
     # Checkpoint saving
     t_save_total = timer.get_total('checkpoint_save')
@@ -320,5 +394,5 @@ if __name__ == '__main__':
     print(f"\n=== 복원 완료 ===")
     print(f"복원된 체크포인트: {outdir}")
     print(f"복원된 plane: {', '.join(LF_PLANE_NAMES)}")
+    print(f"압축 방식: 단일 비디오 (6개 plane을 {tile_layout[0]}x{tile_layout[1]} 레이아웃으로 조합)")
     print(f"처리된 프레임 수: {timer.get_count('frame_reconstruction')}")
-
